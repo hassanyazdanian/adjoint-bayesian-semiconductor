@@ -45,12 +45,6 @@ The code was developed for the legacy FEniCS/dolfin-adjoint stack. A working env
 - Pyro
 - NumPy, SciPy, Matplotlib
 
-Install the package in editable mode from the repository root:
-
-```bash
-pip install -e .
-```
-
 Because FEniCS and dolfin-adjoint can be platform-dependent, using a conda/mamba environment or container is recommended.
 
 ## Quick start
