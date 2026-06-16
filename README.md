@@ -6,7 +6,7 @@ This repository contains Python code accompanying the paper
 The code implements a Bayesian PDE-constrained inverse problem for reconstructing approximately piecewise-constant pn-junction doping profiles from boundary flux measurements. The main components are:
 
 - a nonlinear Poisson--Boltzmann-type forward model solved with FEniCS,
-- a Whittle--Matérn/KL latent Gaussian prior,
+- a Whittle-Matérn/KL latent Gaussian prior,
 - a differentiable sigmoid pushforward map for near piecewise-constant doping fields,
 - a FEniCS/dolfin-adjoint to PyTorch bridge for adjoint gradients,
 - MAP estimation and NUTS posterior sampling,
