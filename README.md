@@ -66,8 +66,8 @@ This script compares adjoint and PyTorch gradients against finite-difference app
 
 ## Citation
 
-If you use this code, please cite the accompanying paper. A `CITATION.cff` file is included and should be updated with the final publication metadata.
+If you use this code, please cite the accompanying paper.
 
 ## License
 
-License information is not finalized yet. Add a license before making the repository public.
+This project is licensed under the MIT License. See the LICENSE file for details.
