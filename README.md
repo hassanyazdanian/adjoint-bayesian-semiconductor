@@ -12,27 +12,19 @@ The code implements a Bayesian PDE-constrained inverse problem for reconstructin
 - MAP estimation and NUTS posterior sampling,
 - posterior post-processing and uncertainty visualization.
 
-## Repository layout
+## Main files
 
-```text
-src/semiconductor_bayes/
-    top_flux_pde.py          # nonlinear PDE model and top-flux observations
-    matern_prior.py          # Matérn-type KL prior and sigmoid/Heaviside pushforward
-    fenics_torch_bridge.py   # custom PyTorch autograd bridge to dolfin-adjoint
-    synthetic_data.py        # synthetic pn-junction data generation
-    map_estimation.py        # MAP objective and optimization utilities
-    nuts_sampling.py         # NUTS posterior sampling utilities
-    postprocess.py           # posterior summaries and plots
+- `generate_synthetic_data.py`: generate synthetic pn-junction data.
+- `pde_model.py`: nonlinear Poisson--Boltzmann-type PDE model and top-boundary flux observations.
+- `matern_torch.py`: Matérn-type KL prior and sigmoid/heaviside pushforward.
+- `fenics_torch_bridge.py`: PyTorch/FEniCS bridge for adjoint-based gradients.
+- `run_map.py`: MAP estimation.
+- `run_pcn.py`: pCN and Gibbs-pCN sampling.
+- `run_nuts.py`: NUTS sampling using Pyro.
+- `postprocess_pcn.py`: pCN post-processing.
+- `postprocess_nuts.py`: NUTS post-processing.
+- `verify_gradients.py`: finite-difference checks for adjoint and PyTorch gradients.
 
-scripts/
-    generate_synthetic_data.py
-    run_map.py
-    run_nuts.py
-    run_postprocess.py
-
-verification/
-    verify_gradients.py      # finite-difference checks for adjoint/PyTorch gradients
-```
 
 ## Installation
 
@@ -40,12 +32,14 @@ The code was developed for the legacy FEniCS/dolfin-adjoint stack. A working env
 
 - Python 3.11
 - FEniCS 2019.1.0
-- dolfin-adjoint 2018.1.0
+- dolfin-adjoint
 - PyTorch
 - Pyro
-- NumPy, SciPy, Matplotlib
-
-Because FEniCS and dolfin-adjoint can be platform-dependent, using a conda/mamba environment or container is recommended.
+- NumPy
+- SciPy
+- Matplotlib
+- scikit-image
+- progressbar2
 
 ## Quick start
 
