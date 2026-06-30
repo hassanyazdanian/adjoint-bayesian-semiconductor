@@ -68,15 +68,17 @@ This script compares adjoint and PyTorch gradients against finite-difference app
 
 If you use this code, please cite:
 
-@misc{yazdanian2026adjointbasedbayesianuncertaintyquantification,
-      title={Adjoint-Based Bayesian Uncertainty Quantification for PDE-Constrained Inverse Problems with Application to Semiconductor Imaging}, 
-      author={Hassan Yazdanian and Leila Taghizadeh and Babak Maboudi Afkham},
-      year={2026},
-      eprint={2606.30340},
-      archivePrefix={arXiv},
-      primaryClass={math.NA},
-      url={https://arxiv.org/abs/2606.30340}, 
+```bibtex
+@misc{yazdanian2026adjointbased,
+  title={Adjoint-Based Bayesian Uncertainty Quantification for PDE-Constrained Inverse Problems with Application to Semiconductor Imaging},
+  author={Yazdanian, Hassan and Taghizadeh, Leila and Maboudi Afkham, Babak},
+  year={2026},
+  eprint={2606.30340},
+  archivePrefix={arXiv},
+  primaryClass={math.NA},
+  url={https://arxiv.org/abs/2606.30340}
 }
+```
 
 ## License
 
