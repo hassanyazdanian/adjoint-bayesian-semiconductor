@@ -3,145 +3,182 @@
 Python code for the paper
 **"Adjoint-Based Bayesian Uncertainty Quantification for PDE-Constrained Inverse Problems with Application to Semiconductor Imaging"**.
 
-The code reconstructs approximately piecewise-constant pn-junction doping profiles from boundary flux measurements. It contains:
+The code reconstructs approximately piecewise-constant pn-junction doping profiles from boundary flux measurements. It contains a nonlinear Poisson-Boltzmann forward model solved with FEniCS and adjoint gradients from dolfin-adjoint, a Whittle-Matérn KL prior with a sigmoid pushforward, MAP estimation, and NUTS (Pyro) and pCN posterior sampling.
 
-- a nonlinear Poisson-Boltzmann forward model solved with FEniCS, with adjoint gradients from dolfin-adjoint;
-- a Whittle-Matérn KL prior with a trend mean and a sigmoid pushforward to near piecewise-constant doping fields;
-- MAP estimation, NUTS (Pyro) and pCN posterior sampling, for known plateau values and for plateau values inferred jointly;
-- the scripts that produce every table and figure of the numerical section of the paper.
+## Folders
+
+| Folder | Paper | Content |
+|---|---|---|
+| `examples/` | Sections 6.3.1, 6.3.2, 6.4; Tables 1 and 2; Figures 3 to 7 | Example 1 (straight junction), Example 2 (curved junction), joint reconstruction of the field and the plateau values |
+| `sensitivity/` | Section 6.3.3; Table 3 | Sensitivity to the data mesh, the KL truncation and the sigmoid steepness; Taylor test; gradient cost; pCN against N_KL |
+
+Each folder is self-contained, with its own copy of the model code and the data. Run every command from inside the folder; the outputs go to `results/` in that folder.
 
 ## Requirements
 
-The paper's results were computed with Python 3.11.13, FEniCS 2019.1.0, dolfin-adjoint 2023.0.0, PyTorch 2.7.1, Pyro 1.9.1, ArviZ 0.23.4, NumPy 2.3.3 and SciPy 1.16.2, together with pandas, matplotlib and scikit-image, on an Apple M4 Pro. Every chain file records the package versions it was run with.
+The paper's results were computed with Python 3.11.13, FEniCS 2019.1.0, dolfin-adjoint 2023.0.0, PyTorch 2.7.1, Pyro 1.9.1, ArviZ 0.23.4, NumPy 2.3.3, SciPy 1.16.2, pandas, matplotlib and scikit-image, on an Apple M4 Pro.
 
-All commands below are run from `codes/`:
+## How a run works
 
-```bash
-cd codes
-```
+- `run_chains.py nuts|pcn <options>` runs four chains in parallel, one process per chain, with one thread per process. Chain c uses the seed `--seed` + c and starts from a prior draw. All other options are passed to `run_nuts.py` or `run_pcn.py`. The chains are written to `results/<method>_Setting<s>_Ex<e><tag>/`, and the wall-clock time of the batch to `results/<method>_Setting<s>_Ex<e><tag>_batch.json`.
+- `postprocess.py <run folder> --data <data file>` computes R-hat, bulk and tail ESS, MCSE, cost-normalised ESS, the posterior mean and std fields, RE, SSIM and the junction depth. It writes `<run folder>_postprocess/`.
+- The data sets of the paper are in `obs/`. `generate_synthetic_data.py` regenerates them (`--examples`, `--data_mesh`) and overwrites the files in `obs/`.
+- The times given below are those of the paper's runs. Run nothing else on the machine during a run if the timings matter.
+- In some MPI environments a process exits with a non-zero status (for example 143) from `MPI_Finalize` after it has written its output. `run_chains.py` checks the chain files instead of the exit status.
 
-## Files
-
-| File | Content |
-|---|---|
-| `config.py` | Model, prior, data and sampler settings |
-| `forward_model.py` | FEM Poisson-Boltzmann model, electrode observation operator, one-solve adjoint gradient |
-| `prior.py` | Matérn KL basis, trend mean, sigmoid pushforward |
-| `posterior.py` | Posterior for known plateaus (z) and for inferred plateaus (z, r_p, r_n); PyTorch bridge |
-| `samplers.py` | pCN (tuned or fixed step) |
-| `diagnostics.py` | Relative L2 error, SSIM, credible intervals, junction depth |
-| `io_utils.py`, `plotting.py` | Data and chain files, run identity; figure helpers |
-| `generate_synthetic_data.py` | Ground truth and noisy data (Examples 1 and 2), computed on a finer mesh |
-| `run_map.py`, `run_nuts.py`, `run_pcn.py` | MAP estimate; one NUTS or pCN chain per process |
-| `postprocess.py` | All chains of a run: R-hat, ESS, MCSE, cost-normalised ESS, field metrics |
-| `production.sh` | Runs one stage of a manifest as a batch of four chains, then validates (`check_run.py`), postprocesses and computes checkpoint diagnostics (`checkpoint_diagnostics.py`) |
-| `experiments/*.json` | Frozen manifests: settings, seeds and data hashes of every run in the paper |
-| `obs/*.pickle` | The data sets used in the paper |
-| `pilot.sh`, `pilot_ex2.sh`, `beta_sweep.py` | pCN step-size sweeps for Examples 1 and 2 |
-| `production_table.py` | Diagnostics and costs of the production runs (`tables.json`) |
-| `production_figures.py` | Posterior mean, std and MAP panels, trace plots |
-| `plot_prior_samples.py` | Prior samples |
-| `joint_report.py`, `make_joint_marginals.py` | Joint reconstruction: diagnostics, posterior summaries, data fit, figures |
-| `compare_samplers.py` | Posterior quantiles of the junction depth with MCSE, between runs |
-| `sensitivity_study.py` | Sensitivity and N_KL scaling study (Table 3 and Section 6.3.3) |
-| `verify_gradients.py`, `gradient_cost.py`, `representation_error.py` | Taylor test, gradient cost against N_KL, best sigmoid approximation of the truth |
-| `make_paper_tables.py` | LaTeX Tables 1-3 from the JSON outputs |
-
-## Reproducing the paper
-
-Outputs are written to `codes/results/`, which is not tracked.
-
-**Runs.** Every sampling run of the paper is a stage of a manifest in `experiments/`. `production.sh` runs one stage at a time as four chains in parallel (one process each), with the seeds, settings and thread limits of the manifest. Before it starts, it checks that the code and the manifest are committed and that the data files have the SHA-256 of the manifest. The run folder is `results/<method>_Setting<s>_Ex<e><tag>/`. One batch of the paper took between 26 minutes and 13.4 hours on the machine above. Run nothing else on the machine during a batch if the timings matter.
+## Example 1: straight junction (Section 6.3.1)
 
 ```bash
-bash production.sh ex1_pcn ex1_nuts                                              # Example 1: pCN, NUTS at target 0.99
-PRODUCTION_MANIFEST=experiments/production_v1_t095.json bash production.sh ex1_nuts  # Example 1: NUTS at target 0.95
-PRODUCTION_MANIFEST=experiments/production_v2_pcn2m.json bash production.sh ex2_pcn  # Example 2: pCN
-PRODUCTION_MANIFEST=experiments/production_v2.json bash production.sh ex2_nuts       # Example 2: NUTS at target 0.95
-PRODUCTION_MANIFEST=experiments/production_v2_t099.json bash production.sh ex2_nuts  # Example 2: NUTS at target 0.99
-PRODUCTION_MANIFEST=experiments/production_v3_joint.json bash production.sh joint_A joint_B   # joint reconstruction
+cd examples
+python plot_prior_samples.py --out results/figures/prior_samples.png                               # Figure 3
+python run_map.py --example 1 --data obs/obs_Ex1.pickle --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --out results/map_Setting1_Ex1                                                                    # MAP estimate
+python pcn_sweep.py --example 1 --factors 0.5 2 3 4 6 8 12                                          # pCN step-size sweep
+
+# pCN with the step of the sweep, 8 x beta_0 (99 min)
+python run_chains.py pcn --example 1 --setting 1 --data obs/obs_Ex1.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --n_warmup 5000 --n_burn 30000 --n_samples 500000 --beta 0.43131272512554686
+python postprocess.py results/pcn_Setting1_Ex1 --data obs/obs_Ex1.pickle
+
+# NUTS, target acceptance probability 0.95 (36 min)
+python run_chains.py nuts --example 1 --setting 1 --data obs/obs_Ex1.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --warmup_steps 500 --num_samples 2000 --full_mass True --target_accept_prob 0.95 --max_tree_depth 10
+python postprocess.py results/nuts_Setting1_Ex1 --data obs/obs_Ex1.pickle
+
+# NUTS, target 0.99, compared in the text (52 min)
+python run_chains.py nuts --example 1 --setting 1 --data obs/obs_Ex1.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --warmup_steps 500 --num_samples 2000 --full_mass True --target_accept_prob 0.99 --max_tree_depth 10 --tag _t099
+python postprocess.py results/nuts_Setting1_Ex1_t099 --data obs/obs_Ex1.pickle
+
+# Figure 4, and Figure 5 (a, b)
+python make_figures.py --example 1 --pcn results/pcn_Setting1_Ex1 --nuts results/nuts_Setting1_Ex1 \
+  --map results/map_Setting1_Ex1 --out results/figures/ex1
+python make_figures.py --example 1 --pcn results/pcn_Setting1_Ex1 --nuts results/nuts_Setting1_Ex1 \
+  --map results/map_Setting1_Ex1 --quantities depth --panel_letters a b --no_legend --out results/figures/ex1_depth
 ```
 
-**Data.** The data sets of the paper are in `obs/` (192 x 192 data mesh; for Table 3 also 96 and 384). `generate_synthetic_data.py` regenerates them and overwrites the files in `obs/`:
+## Example 2: curved junction (Section 6.3.2)
 
 ```bash
-python generate_synthetic_data.py                                # obs/obs_Ex1.pickle, obs/obs_Ex2.pickle
-python generate_synthetic_data.py --examples 1 --data_mesh 96    # obs/obs_Ex1_mesh96.pickle
-python generate_synthetic_data.py --examples 1 --data_mesh 384   # obs/obs_Ex1_mesh384.pickle
+cd examples
+python run_map.py --example 2 --data obs/obs_Ex2.pickle --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --out results/map_Setting1_Ex2                                                                    # MAP estimate
+python pcn_sweep.py --example 2 --factors 6 8 12                                                    # pCN step-size sweep
+
+# pCN with the step of the sweep, 8 x beta_0 (378 min)
+python run_chains.py pcn --example 2 --setting 1 --data obs/obs_Ex2.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --n_warmup 5000 --n_burn 30000 --n_samples 2000000 --beta 0.231701399076914
+python postprocess.py results/pcn_Setting1_Ex2 --data obs/obs_Ex2.pickle
+
+# NUTS, target 0.95 (75 min)
+python run_chains.py nuts --example 2 --setting 1 --data obs/obs_Ex2.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --warmup_steps 500 --num_samples 2000 --full_mass True --target_accept_prob 0.95 --max_tree_depth 10
+python postprocess.py results/nuts_Setting1_Ex2 --data obs/obs_Ex2.pickle
+
+# NUTS, target 0.99, compared in the text (88 min)
+python run_chains.py nuts --example 2 --setting 1 --data obs/obs_Ex2.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --warmup_steps 500 --num_samples 2000 --full_mass True --target_accept_prob 0.99 --max_tree_depth 10 --tag _t099
+python postprocess.py results/nuts_Setting1_Ex2_t099 --data obs/obs_Ex2.pickle
+
+# Figure 6, Figure 5 (c, d), and the quantiles of the junction depth quoted in the text
+python make_figures.py --example 2 --pcn results/pcn_Setting1_Ex2 --nuts results/nuts_Setting1_Ex2 \
+  --map results/map_Setting1_Ex2 --out results/figures/ex2
+python make_figures.py --example 2 --pcn results/pcn_Setting1_Ex2 --nuts results/nuts_Setting1_Ex2 \
+  --map results/map_Setting1_Ex2 --quantities depth --panel_letters c d --out results/figures/ex2_depth
+python compare_samplers.py results/pcn_Setting1_Ex2 results/nuts_Setting1_Ex2 results/nuts_Setting1_Ex2_t099 \
+  --example 2 --out results/ex2_depth_quantiles
 ```
 
-**pCN step size (Sections 6.3.1, 6.3.2).** Four chains of 100 000 draws for the tuned step and for fixed multiples of it. `pilot.sh` also runs NUTS pilots, which the paper does not use.
+## Joint reconstruction (Section 6.4)
+
+Stage A uses the paper's plateau intervals, Stage B intervals twice as wide with the same centres.
 
 ```bash
-bash pilot.sh
-bash pilot_ex2.sh
+cd examples
+# Stage A (668 min)
+python run_chains.py nuts --example 1 --setting 2 --data obs/obs_Ex1.pickle --seed 100 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --cp_bounds -2.5 -1.5 --cn_bounds 0.5 1.5 \
+  --warmup_steps 500 --num_samples 2000 --full_mass True --target_accept_prob 0.99 --max_tree_depth 10 --tag _A
+python postprocess.py results/nuts_Setting2_Ex1_A --data obs/obs_Ex1.pickle
+
+# Stage B (806 min)
+python run_chains.py nuts --example 1 --setting 2 --data obs/obs_Ex1.pickle --seed 200 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --cp_bounds -3 -1 --cn_bounds 0 2 \
+  --warmup_steps 500 --num_samples 2000 --full_mass True --target_accept_prob 0.99 --max_tree_depth 10 --tag _B
+python postprocess.py results/nuts_Setting2_Ex1_B --data obs/obs_Ex1.pickle
+
+# Posterior summaries, correlations and data fit of both stages; Figure 7 (a, b): joint_mean_A.png, joint_std_A.png
+python joint_report.py --run_a results/nuts_Setting2_Ex1_A --run_b results/nuts_Setting2_Ex1_B \
+  --known_plateau_run results/nuts_Setting1_Ex1 --out results/joint
+# Figure 7 (c, d)
+python make_joint_marginals.py results/nuts_Setting2_Ex1_A results/joint/tables.json results/joint
 ```
 
-**Tables 1 and 2, MAP estimates and Example 2 depth quantiles.**
+## Tables 1 and 2
+
+After the runs of Examples 1 and 2 and Stage A of the joint reconstruction:
 
 ```bash
-P=results/pcn_Setting1_Ex1_pilot
-python production_table.py --stages ex1_pcn experiments/production_v1_t095.json:ex1_nuts ex1_nuts \
-  --out results/production_v1_report/ex1 \
-  --pilot "pCN tuned=$P" --pilot "pCN 0.5x=${P}_beta_x0.5" --pilot "pCN 2x=${P}_beta_x2" --pilot "pCN 3x=${P}_beta_x3" \
-  --pilot "pCN 4x=${P}_beta_x4" --pilot "pCN 6x=${P}_beta_x6" --pilot "pCN 8x=${P}_beta_x8" --pilot "pCN 12x=${P}_beta_x12"
-P=results/pcn_Setting1_Ex2_pilot
-python production_table.py --manifest experiments/production_v2.json \
-  --stages experiments/production_v2_pcn2m.json:ex2_pcn ex2_nuts experiments/production_v2_t099.json:ex2_nuts \
-  --out results/production_v2_report/ex2 \
-  --pilot "pCN tuned=$P" --pilot "pCN 6x=${P}_beta_x6" --pilot "pCN 8x=${P}_beta_x8" --pilot "pCN 12x=${P}_beta_x12"
-python joint_report.py --manifest experiments/production_v3_joint.json --out results/production_v3_report/joint \
-  --known_plateau_run results/nuts_Setting1_Ex1_prod_v1_t095
-python run_map.py --example 1 --data obs/obs_Ex1.pickle --tau 16 --n_kl 12 --k 14 --mean_a 2 --out results/map_Setting1_Ex1_prod_v1
-python run_map.py --example 2 --data obs/obs_Ex2.pickle --tau 16 --n_kl 12 --k 14 --mean_a 2 --out results/map_Setting1_Ex2_prod_v2
-python compare_samplers.py results/pcn_Setting1_Ex2_prod_v2_pcn2m results/nuts_Setting1_Ex2_prod_v2 \
-  results/nuts_Setting1_Ex2_prod_v2_t099 --example 2 --out results/production_v2_report/ex2/comparison
+cd examples
+python make_tables.py          # results/tables/table1_ex1.tex, table2_ex2.tex; tables.md compares all runs
 ```
 
-`production_table.py` writes `tables.json` and `tables.md`. The pCN sweep values of Sections 6.3.1 and 6.3.2 are in their tuning-pilot table. `joint_report.py` writes the joint diagnostics, posterior summaries, correlations and data misfit of Section 6.4, for both prior supports (`joint_A`, `joint_B`).
-
-**Figures.**
+## Section 6.3.3 and Table 3
 
 ```bash
-python plot_prior_samples.py --out results/figures/prior_samples.png                      # Figure 3
-python production_figures.py --example 1 --map results/map_Setting1_Ex1_prod_v1 \
-  --nuts_manifest experiments/production_v1_t095.json --out results/figures/ex1           # Figure 4
-python production_figures.py --example 2 --manifest experiments/production_v2_pcn2m.json \
-  --nuts_manifest experiments/production_v2.json --map results/map_Setting1_Ex2_prod_v2 \
-  --out results/figures/ex2                                                               # Figure 6
-python production_figures.py --example 1 --map results/map_Setting1_Ex1_prod_v1 --nuts_manifest experiments/production_v1_t095.json \
-  --quantities depth --panel_letters a b --no_legend --out results/figures/ex1_depth      # Figure 5 (a, b)
-python production_figures.py --example 2 --manifest experiments/production_v2_pcn2m.json --nuts_manifest experiments/production_v2.json \
-  --map results/map_Setting1_Ex2_prod_v2 --quantities depth --panel_letters c d --out results/figures/ex2_depth   # Figure 5 (c, d)
-python make_joint_marginals.py results/nuts_Setting2_Ex1_prod_v3_joint_A \
-  results/production_v3_report/joint/tables.json results/production_v3_report/joint                         # Figure 7 (c, d)
+cd sensitivity
+python verify_gradients.py              # Taylor test in both inference settings; prints "Gradient checks passed."
+python gradient_cost.py                 # time of one adjoint gradient for N_KL = 12 to 192 -> results/scaling_Ex1/
+python representation_error.py          # best sigmoid approximation of the truth for k = 10, 14, 20, 28 -> results/kstudy_Ex1/
+
+# Table 3: NUTS, four chains of 500 draws (26 to 145 min each). Reference run:
+python run_chains.py nuts --example 1 --setting 1 --data obs/obs_Ex1.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --warmup_steps 500 --num_samples 500 --full_mass True --target_accept_prob 0.95 --max_tree_depth 10 --tag _ref
+python postprocess.py results/nuts_Setting1_Ex1_ref --data obs/obs_Ex1.pickle
 ```
 
-Figure 7 (a, b) is `joint_mean_A.png` and `joint_std_A.png` of `joint_report.py`.
+The other rows of Table 3 use the same command with one change each. Run each command, then `python postprocess.py results/nuts_Setting1_Ex1<tag> --data <data file>`:
 
-**Table 3 and the sensitivity and scaling results (Section 6.3.3).**
+| Row | Change to the reference command | Data file for postprocess.py |
+|---|---|---|
+| Data 96 | `--data obs/obs_Ex1_mesh96.pickle --tag _data96` | `obs/obs_Ex1_mesh96.pickle` |
+| Data 384 | `--data obs/obs_Ex1_mesh384.pickle --tag _data384` | `obs/obs_Ex1_mesh384.pickle` |
+| N_KL = 24 | `--n_kl 24 --tag _nkl24` | `obs/obs_Ex1.pickle` |
+| N_KL = 48 | `--n_kl 48 --tag _nkl48` | `obs/obs_Ex1.pickle` |
+| N_KL = 96 | `--n_kl 96 --tag _nkl96` | `obs/obs_Ex1.pickle` |
+| k = 10 | `--k 10 --tag _k10` | `obs/obs_Ex1.pickle` |
+| k = 20 | `--k 20 --tag _k20` | `obs/obs_Ex1.pickle` |
+| k = 28 | `--k 28 --tag _k28` | `obs/obs_Ex1.pickle` |
+
+For example, the row Data 96:
 
 ```bash
-PRODUCTION_MANIFEST=experiments/study_k_v1.json bash production.sh k14 k20 k28
-PRODUCTION_MANIFEST=experiments/study_k_v1_k10r.json bash production.sh k10
-PRODUCTION_MANIFEST=experiments/study_timing_v1.json bash production.sh data96 data384 nkl24 nkl48 nkl96
-PRODUCTION_MANIFEST=experiments/study_pcn_nkl_v1.json bash production.sh pcn_nkl24 pcn_nkl48 pcn_nkl96
-python sensitivity_study.py rows      # Table 3 -> results/sensitivity_ex1/sensitivity.{json,md}
-python sensitivity_study.py pcn       # pCN at N_KL = 12, 24, 48, 96 -> results/sensitivity_ex1/pcn_nkl.{json,md}
-python verify_gradients.py            # Taylor test in both inference settings; prints "Gradient checks passed."
-python gradient_cost.py               # adjoint gradient cost for N_KL = 12 to 192 -> results/scaling_Ex1/
-python representation_error.py        # best sigmoid approximation of the truth for k = 10, 14, 20, 28 -> results/kstudy_Ex1/
+python run_chains.py nuts --example 1 --setting 1 --data obs/obs_Ex1_mesh96.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --warmup_steps 500 --num_samples 500 --full_mass True --target_accept_prob 0.95 --max_tree_depth 10 --tag _data96
+python postprocess.py results/nuts_Setting1_Ex1_data96 --data obs/obs_Ex1_mesh96.pickle
 ```
 
-The reference row of Table 3 is stage `k14` of `study_k_v1.json`. The `k10` stage of that manifest is not used: its batch ran while other heavy processes were running, and it was rerun under `study_k_v1_k10r.json`.
-
-**LaTeX tables.**
+Then:
 
 ```bash
-python make_paper_tables.py           # Tables 1-3 -> results/paper_tables/
+python sensitivity_study.py rows        # results/sensitivity/table3_sensitivity.tex, sensitivity.{json,md}
 ```
 
-**Note.** In some MPI environments a process exits with a non-zero status (for example 143) from `MPI_Finalize` after it has written its output. The scripts validate the outputs instead of relying on the exit status.
+pCN against N_KL, with the step and lengths of Example 1 (about 100 min each):
+
+```bash
+python run_chains.py pcn --example 1 --setting 1 --data obs/obs_Ex1.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \
+  --n_warmup 5000 --n_burn 30000 --n_samples 500000 --beta 0.43131272512554686
+python postprocess.py results/pcn_Setting1_Ex1 --data obs/obs_Ex1.pickle
+```
+
+Repeat with `--n_kl 24 --tag _nkl24`, `--n_kl 48 --tag _nkl48` and `--n_kl 96 --tag _nkl96`, postprocess each run, then:
+
+```bash
+python sensitivity_study.py pcn         # results/sensitivity/pcn_nkl.{json,md}
+```
+
+The N_KL = 12 run is the pCN run of Example 1. Instead of running it again, you can use the one in `examples/` with `python sensitivity_study.py pcn --run "N_KL 12=../examples/results/pcn_Setting1_Ex1"`.
 
 ## Citation
 
