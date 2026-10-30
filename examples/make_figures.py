@@ -1,10 +1,10 @@
-# production_figures.py
+# make_figures.py
 """
-Figures 4 and 5 of the revised paper for one example, from the production runs of a manifest and a
-MAP run (Figure 3, the prior samples, is plot_prior_samples.py). Inputs are checked before use: the
-chain files, fields.npz and summary.json of every stage must belong together and to the manifest's
-data, and the MAP must have the manifest's prior and data.
-File names start with ex<example> (Example 1: Figs. 4 and 5 of the revision; Example 2: Fig. 6 and its traces).
+Figures of one example with known plateau values, from a pCN run, a NUTS run and a MAP run (Example 1: Figure 4
+and Figure 5 (a, b); Example 2: Figure 6 and Figure 5 (c, d); Figure 3, the prior samples, is plot_prior_samples.py).
+Inputs are checked before use: the chain files, fields.npz and summary.json of each run must belong together and to
+the data file, and the MAP must have the chains' prior and data.
+File names start with ex<example>.
 - ex<e>_true.png, ex<e>_mean_pcn.png, ex<e>_mean_nuts.png, ex<e>_map.png: one color scale (c_p, c_n);
   true interface solid black, inferred interface (c = 0 of the field shown) dashed red.
 - ex<e>_std_pcn.png, ex<e>_std_nuts.png: posterior std on one color scale, with both interfaces.
@@ -15,8 +15,8 @@ File names start with ex<example> (Example 1: Figs. 4 and 5 of the revision; Exa
   transitions are marked. --panel_letters a b prefixes the two panel titles with "(a) " and "(b) ";
   --no_legend omits the legend row below the panels (both also for ex<e>_traces_full.png).
 - ex<e>_traces_full.png: the same over each sampler's whole run (pCN at every n-th draw, display only).
-Usage: python production_figures.py --example 1 --map results/map_Setting1_Ex1_prod_v1 --out results/production_v1_report/ex1/figures
-       [--nuts_manifest experiments/production_v1_t095.json]   (the NUTS run of another manifest, same data)
+Usage: python make_figures.py --example 1 --pcn results/pcn_Setting1_Ex1 --nuts results/nuts_Setting1_Ex1 \
+           --map results/map_Setting1_Ex1 --out results/figures/ex1
 """
 import argparse
 import json
@@ -45,18 +45,16 @@ def _label(q):
     return r"junction depth $d$" if q == "depth" else rf"$z_{{{int(q[2:-1]) + 1}}}$"
 
 
-def load_stage(m, method, example, setting=1):
-    run = f"results/{method}_Setting{setting}_Ex{example}{m['output_tag']}"
+def load_stage(run, method, data_sha):
     pp = run + "_postprocess"
     with open(f"{pp}/summary.json") as f:
         s = json.load(f)
     fields = np.load(f"{pp}/fields.npz")
     chains = load_chains(run)
     hashes = [chain_content_sha256(c) for c in chains]
-    data_sha = m["data"][f"ex{example}"]["sha256"]
     if not (hashes == s["chain_content_sha256"] == [str(h) for h in fields["chain_content_sha256"]]
-            and s["data_sha256"] == str(fields["data_sha256"]) == data_sha):
-        raise ValueError(f"{run}: chains, fields.npz, summary.json and the manifest's data do not belong together")
+            and s["data_sha256"] == str(fields["data_sha256"]) == data_sha and s["method"] == method):
+        raise ValueError(f"{run}: chains, fields.npz, summary.json and the data do not belong together")
     diag = pd.read_csv(f"{pp}/diagnostics.csv", index_col=0)
     return dict(method=method, run=run, summary=s, fields=fields, chains=chains, diag=diag)
 
@@ -90,28 +88,24 @@ def trace_column(st, quantities, thin=None, x_max=None):
 
 
 def main(a):
-    with open(a.manifest) as f:
-        m = json.load(f)
-    data_info = m["data"][f"ex{a.example}"]
-    data = load_data(data_info["path"])
-    if data["_source"]["sha256"] != data_info["sha256"]:
-        raise ValueError(f"{data_info['path']} is not the manifest's data")
-    manifests = {"pcn": m, "nuts": m if a.nuts_manifest is None else json.load(open(a.nuts_manifest))}
-    if manifests["nuts"]["data"][f"ex{a.example}"]["sha256"] != data_info["sha256"]:
-        raise ValueError(f"{a.nuts_manifest} uses other data than {a.manifest}")
-    stages = {meth: load_stage(manifests[meth], meth, a.example) for meth in ("pcn", "nuts")}
+    data = load_data(a.data or f"obs/obs_Ex{a.example}.pickle")
+    data_sha = data["_source"]["sha256"]
+    stages = {meth: load_stage(run, meth, data_sha) for meth, run in (("pcn", a.pcn), ("nuts", a.nuts))}
+    keys = ("tau", "alpha", "n_kl", "k", "mean_a")
+    p = stages["nuts"]["chains"][0]["prior"]
+    if [stages["pcn"]["chains"][0]["prior"].get(k) for k in keys] != [p.get(k) for k in keys]:
+        raise ValueError(f"{a.pcn} and {a.nuts} were sampled with different priors")
 
     with open(os.path.join(a.map, "map.pickle"), "rb") as f:
         mp = pickle.load(f)
-    p = m["model"]["prior"]
-    if ((mp.get("provenance") or {}).get("data_sha256") != data_info["sha256"]
-            or [mp["prior"].get(k) for k in ("tau", "alpha", "n_kl", "k", "mean_a")] != [p[k] for k in ("tau", "alpha", "n_kl", "k", "mean_a")]):
-        raise ValueError(f"{a.map}: the MAP was not computed with the manifest's prior and data")
+    if ((mp.get("provenance") or {}).get("data_sha256") != data_sha
+            or [mp["prior"].get(k) for k in keys] != [p.get(k) for k in keys]):
+        raise ValueError(f"{a.map}: the MAP was not computed with the chains' prior and data")
 
     os.makedirs(a.out, exist_ok=True)
     V = dl.FunctionSpace(dl.UnitSquareMesh(dl.MPI.comm_self, data["mesh_n"], data["mesh_n"]), "CG", 1)
     c_true = data["c_true"]
-    cp, cn = m["model"]["plateaus_known"]["cp"], m["model"]["plateaus_known"]["cn"]
+    cp, cn = float(data["cp_true"]), float(data["cn_true"])
     lab = r"$c(\boldsymbol{x})$"
     mean_lab, std_lab = r"$\mathbb{E}[c(\boldsymbol{x}) \mid y]$", r"$\mathrm{std}(c(\boldsymbol{x}) \mid y)$"
     pre = os.path.join(a.out, f"ex{a.example}_")
@@ -155,7 +149,7 @@ def main(a):
                       pre + "traces.png", xlim=(0, budget / 1e3 * 1.01), **kw)
     plot_trace_chains(lettered([trace_column(stages[meth], quantities) for meth in ("pcn", "nuts")]),
                       pre + "traces_full.png", **kw)
-    record = dict(manifest={k: v["id"] for k, v in manifests.items()}, example=a.example, runs={k: v["run"] for k, v in stages.items()},
+    record = dict(example=a.example, runs={k: v["run"] for k, v in stages.items()},
                   chain_content_sha256={k: v["summary"]["chain_content_sha256"] for k, v in stages.items()},
                   map=a.map, map_RE=mp["RE"], map_SSIM=mp["SSIM"], trace_quantities=quantities, true_depth_x05=d_true,
                   std_color_max=smax, equal_cost_window_solves=budget, nuts_solves_per_draw=per_draw,
@@ -168,10 +162,11 @@ def main(a):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--manifest", default="experiments/production_v1.json")
     ap.add_argument("--example", type=int, required=True)
-    ap.add_argument("--map", required=True, help="run_map.py output folder (map.pickle) with the manifest's prior")
-    ap.add_argument("--nuts_manifest", default=None, help="manifest of the NUTS run to show (default: --manifest)")
+    ap.add_argument("--pcn", required=True, help="pCN run folder")
+    ap.add_argument("--nuts", required=True, help="NUTS run folder")
+    ap.add_argument("--map", required=True, help="run_map.py output folder (map.pickle) with the chains' prior")
+    ap.add_argument("--data", default=None, help="data file (default obs/obs_Ex<example>.pickle)")
     ap.add_argument("--quantities", nargs="*", default=None,
                     help="trace rows, e.g. depth 'z[3]' (default: depth and each sampler's bottleneck coefficient)")
     ap.add_argument("--panel_letters", nargs=2, default=None, metavar=("L1", "L2"),

@@ -1,10 +1,9 @@
 # joint_report.py
 """
-Report of the joint reconstruction (Example 1, Setting 2: KL coefficients and plateau values c_p, c_n) of a
-manifest with two stages, e.g. experiments/production_v3_joint.json: Stage A (the paper's plateau intervals)
-and Stage B (intervals twice as wide, same centres). For every stage the chains, the postprocessing output
-(summary.json, fields.npz, diagnostics.csv, checkpoints.json) and the batch record must belong together, to the
-manifest's data, and to the stage's seeds and plateau bounds.
+Report of the joint reconstruction (Example 1, Setting 2: KL coefficients and plateau values c_p, c_n, paper
+Section 6.4) from two NUTS runs: Stage A (the paper's plateau intervals, config.CP_BOUNDS and config.CN_BOUNDS) and
+Stage B (intervals twice as wide, same centres). For every stage the chains, the postprocessing output (summary.json,
+fields.npz, diagnostics.csv) and the data must belong together, and all chains must have the same plateau bounds.
 
 Outputs in --out:
 - tables.json, tables.md: diagnostics over all monitored quantities (KL coefficients, c_p, c_n, d); divergences
@@ -14,9 +13,8 @@ Outputs in --out:
   outside the paper's interval; corr(c_p, d), corr(c_n, d), corr(c_p, c_n); changes from the first to the second
   stage in combined MCSE units, and the relative L2 change of the mean and std fields; data fit: normalized
   misfit ||F(theta) - y||^2 / (sigma^2 N_meas) on the inversion mesh at 200 retained draws (evenly spaced, 50
-  per chain) of each stage and of the known-plateau production posterior (--known_plateau_run), and its value
+  per chain) of each stage and of the known-plateau NUTS posterior (--known_plateau_run), and its value
   for the true field on the inversion mesh.
-- joint_table.tex: the table for the paper, one column per stage.
 - joint_mean_A.png, joint_std_A.png: posterior mean and std of the first stage; true interface solid black,
   inferred interface (c = 0 of the mean) dashed red.
 - joint_marginals.png: marginal posteriors of c_p, c_n and d of both stages, prior supports and true values.
@@ -25,8 +23,8 @@ Outputs in --out:
 Definitions as in the paper (Section 6.3): rank-normalized split R-hat, bulk and tail ESS (ArviZ); minimum ESS =
 smallest bulk or tail ESS over all monitored quantities; forward-equivalent solves N_F + lambda N_A with the run's
 own lambda (ratio of mean adjoint to mean forward solve time); MCSE of means, sds, quantiles and masses (ArviZ).
-Usage: python joint_report.py --manifest experiments/production_v3_joint.json --out results/production_v3_report/joint
-       [--known_plateau_run results/nuts_Setting1_Ex1_prod_v1_t095]
+Usage: python joint_report.py --run_a results/nuts_Setting2_Ex1_A --run_b results/nuts_Setting2_Ex1_B --out results/joint
+       [--known_plateau_run results/nuts_Setting1_Ex1] [--data obs/obs_Ex1.pickle]
 """
 import argparse
 import json
@@ -39,7 +37,8 @@ import pandas as pd
 
 from diagnostics import interface_depth, mass_matrix
 from forward_model import PoissonBoltzmannModel
-from io_utils import chain_content_sha256, chain_prior, code_version, file_sha256, load_chains, load_data
+import config as cfg
+from io_utils import chain_content_sha256, chain_prior, code_version, load_chains, load_data
 from plotting import CHAIN_COLORS, MEAN_INTERFACE, TRUE_INTERFACE, plot_field, plot_trace_chains
 from posterior import Posterior
 import matplotlib.pyplot as plt                       # noqa: E402  (backend set by plotting)
@@ -58,40 +57,32 @@ def _q(q):
     return f"z_{int(q[2:-1]) + 1}" if q.startswith("z[") else MD.get(q, q)
 
 
-def load_stage(m, manifest_path, name):
-    st = m["stages"][name]
-    run = f"results/nuts_Setting{st['setting']}_Ex{st['example']}{m['output_tag']}{st.get('tag', '')}"
+def load_stage(run, name, data_sha):
     pp = run + "_postprocess"
     with open(f"{pp}/summary.json") as f:
         s = json.load(f)
     fields = np.load(f"{pp}/fields.npz")
     chains = load_chains(run)
-    data_sha = m["data"][f"ex{st['example']}"]["sha256"]
     if not ([chain_content_sha256(c) for c in chains] == s["chain_content_sha256"]
             == [str(h) for h in fields["chain_content_sha256"]] and s["data_sha256"] == str(fields["data_sha256"]) == data_sha):
-        raise ValueError(f"{run}: chains, fields.npz, summary.json and the manifest's data do not belong together")
-    b = st.get("plateau_bounds", m["model"]["plateau_bounds_joint"])
+        raise ValueError(f"{run}: chains, fields.npz, summary.json and the data do not belong together")
+    if any(c["r"] is None for c in chains):
+        raise ValueError(f"{run}: not a joint (Setting 2) run")
+    b = chains[0]["plateau_bounds"]
     bounds = {"cp": tuple(map(float, b["cp"])), "cn": tuple(map(float, b["cn"]))}
-    seed = st.get("seed", m["chains"]["seed"])
-    man_sha = file_sha256(manifest_path)
+    seed = chains[0]["info"]["seed"] - chains[0]["info"]["chain"]
     for c in chains:
         if c.get("plateau_bounds") != bounds:
             raise ValueError(f"{c['file']}: plateau bounds {c.get('plateau_bounds')} instead of {bounds}")
         if c["info"].get("seed") != seed + c["info"]["chain"]:
             raise ValueError(f"{c['file']}: seed {c['info'].get('seed')} instead of {seed + c['info']['chain']}")
-        if ((c.get("provenance") or {}).get("manifest") or {}).get("sha256") != man_sha:
-            raise ValueError(f"{c['file']}: not run with {manifest_path}")
     with open(run + "_batch.json") as f:
         batch = json.load(f)
-    with open(f"{pp}/checkpoints.json") as f:
-        ckpt = json.load(f)
-    if ckpt.get("chain_content_sha256", s["chain_content_sha256"]) != s["chain_content_sha256"]:
-        raise ValueError(f"{pp}/checkpoints.json belongs to other chains")
     diag = pd.read_csv(f"{pp}/diagnostics.csv", index_col=0)
     draws = dict(cp=np.stack([c["cp"] for c in chains]), cn=np.stack([c["cn"] for c in chains]),
                  depth=np.asarray(fields["depth"], dtype=float))
     return dict(name=name, label=name.split("_")[-1], run=run, pp=pp, summary=s, fields=fields, chains=chains,
-                diag=diag, batch=batch, checkpoints=ckpt, bounds=bounds, seed=seed, draws=draws)
+                diag=diag, batch=batch, bounds=bounds, seed=seed, draws=draws)
 
 
 def _mcse(x, **kw):
@@ -125,8 +116,7 @@ def diagnostics(st):
                 min_ess=float(min(b.min(), t.min())), min_ess_quantity=_q((b if kind == "bulk" else t).idxmin()), min_ess_kind=kind,
                 per_quantity={_q(q): dict(r_hat=float(r.r_hat), ess_bulk=float(r.ess_bulk), ess_tail=float(r.ess_tail))
                               for q, r in d.iterrows()},
-                passes=bool(conv["passes"]), thresholds=conv["thresholds"],
-                first_pass=st["checkpoints"]["milestone"])
+                passes=bool(conv["passes"]), thresholds=conv["thresholds"])
 
 
 def divergences(st):
@@ -273,12 +263,12 @@ def data_fit(chains, data, n=DATA_FIT_DRAWS):
 
 
 def known_plateau_run(run, data_sha):
-    """Chains of the known-plateau production posterior, checked against their postprocessing output and the data."""
+    """Chains of the known-plateau posterior, checked against their postprocessing output and the data."""
     chains = load_chains(run)
     with open(run + "_postprocess/summary.json") as f:
         s = json.load(f)
     if [chain_content_sha256(c) for c in chains] != s["chain_content_sha256"] or s["data_sha256"] != data_sha:
-        raise ValueError(f"{run}: chains, summary.json and the manifest's data do not belong together")
+        raise ValueError(f"{run}: chains, summary.json and the data do not belong together")
     if any(c["r"] is not None for c in chains):
         raise ValueError(f"{run}: not a known-plateau (Setting 1) run")
     return chains, s
@@ -384,93 +374,9 @@ def figures(stages, recs, V, truth, c_true, out):
 
 # ---- tables ---------------------------------------------------------------------------------------------
 
-def _pm(s, nd=3):
-    return f"${s['mean']:.{nd}f}\\pm{s['sd']:.{nd}f}$"
-
-
-def _iv(s, nd=3):
-    return f"$[{s['q05']:.{nd}f}, {s['q95']:.{nd}f}]$"
-
-
-def _pct(m):
-    return f"{100 * m['value']:.1f}"
-
-
-def tex_table(m, recs, label):
-    st = [r for r in recs]
-    rows = []
-
-    def row(name, cells):
-        rows.append(" & ".join([name] + cells) + " \\\\")
-
-    row("Prior of $c_{\\mathrm{p}}$", [f"$\\mathcal U({r['plateau_bounds']['c_p'][0]:g},{r['plateau_bounds']['c_p'][1]:g})$" for r in st])
-    row("Prior of $c_{\\mathrm{n}}$", [f"$\\mathcal U({r['plateau_bounds']['c_n'][0]:g},{r['plateau_bounds']['c_n'][1]:g})$" for r in st])
-    rows.append("\\hline")
-    for q in ("c_p", "c_n", "d"):
-        t = {"c_p": "$c_{\\mathrm{p}}$", "c_n": "$c_{\\mathrm{n}}$", "d": "$d$"}[q]
-        row(f"{t}: mean$\\pm$sd", [_pm(r["posterior"][q]) for r in st])
-        row(f"{t}: 90\\,\\% interval", [_iv(r["posterior"][q]) + ("" if r["posterior"][q]["interval90_contains_truth"] else "$^*$") for r in st])
-    row("Post./prior sd, $c_{\\mathrm{p}}$ / $c_{\\mathrm{n}}$",
-        [f"{r['plateaus']['c_p']['sd_ratio']:.2f} / {r['plateaus']['c_n']['sd_ratio']:.2f}" for r in st])
-    row("Mass near bounds (\\%), $c_{\\mathrm{p}}$", [f"{_pct(r['plateaus']['c_p']['mass_near_lower'])} / {_pct(r['plateaus']['c_p']['mass_near_upper'])}" for r in st])
-    row("Mass near bounds (\\%), $c_{\\mathrm{n}}$", [f"{_pct(r['plateaus']['c_n']['mass_near_lower'])} / {_pct(r['plateaus']['c_n']['mass_near_upper'])}" for r in st])
-    row("Mass outside paper's interval (\\%)",
-        [("--" if "mass_outside_paper_interval" not in r["plateaus"]["c_p"] else
-          f"{_pct(r['plateaus']['c_p']['mass_outside_paper_interval'])} / {_pct(r['plateaus']['c_n']['mass_outside_paper_interval'])}") for r in st])
-    for k, t in (("c_p,d", "$\\operatorname{corr}(c_{\\mathrm{p}},d)$"), ("c_n,d", "$\\operatorname{corr}(c_{\\mathrm{n}},d)$"),
-                 ("c_p,c_n", "$\\operatorname{corr}(c_{\\mathrm{p}},c_{\\mathrm{n}})$")):
-        row(t, [f"${r['correlations'][k]:.2f}$" for r in st])
-    rows.append("\\hline")
-    row("RE / SSIM", [f"{r['RE']:.3f} / {r['SSIM']:.3f}" for r in st])
-    row("$\\max\\hat R$", [f"{r['diagnostics']['r_hat_max']:.3f}" for r in st])
-    row("Min.\\ bulk / tail ESS", [f"{r['diagnostics']['ess_bulk_min']:.0f} / {r['diagnostics']['ess_tail_min']:.0f}" for r in st])
-    row("Divergences", [f"{r['divergences']['count']} ({100 * r['divergences']['fraction']:.2f}\\,\\%)" for r in st])
-    row("PDE solves ($10^6$), retained / total",
-        [f"{r['cost']['pde_solves']['sampling'] / 1e6:.2f} / {r['cost']['pde_solves']['total'] / 1e6:.2f}" for r in st])
-    row("Wall-clock time (min)", [f"{r['cost']['wall_clock_s'] / 60:.0f}" for r in st])
-    row("ESS per $10^3$ solves, retained / total",
-        [f"{r['cost']['min_ess_per_1000_forward_equivalents']['sampling']:.2f} / {r['cost']['min_ess_per_1000_forward_equivalents']['total']:.2f}" for r in st])
-    r0 = st[0]
-    wide = [r for r in st if "mass_outside_paper_interval" in r["plateaus"]["c_p"]]
-    outside = ""
-    if wide:
-        pp, pn = wide[0]["plateaus"]["c_p"], wide[0]["plateaus"]["c_n"]
-        outside = ("Mass outside paper's interval: posterior mass of $c_{\\mathrm{p}}$ / $c_{\\mathrm{n}}$ outside "
-                   f"$[{pp['paper_interval'][0]:g},{pp['paper_interval'][1]:g}]$ / $[{pn['paper_interval'][0]:g},{pn['paper_interval'][1]:g}]$ "
-                   f"(prior mass {100 * pp['prior_mass_outside_paper_interval']:.0f}\\,\\% / {100 * pn['prior_mass_outside_paper_interval']:.0f}\\,\\%). ")
-    no_cross = [r for r in st if r["depth_without_crossing"]]
-    no_cross = "".join(
-        f"Stage {r['stage'].split('_')[-1]}: {r['depth_without_crossing']} of {r['chains'] * r['draws_per_chain']} draws have no "
-        f"crossing of $c=0$ on $x=0.5$ and are given $d=0$ ({r['depth_without_crossing_split']['d0']} draws, $c>0$ on the whole line) "
-        f"or $d=1$ ({r['depth_without_crossing_split']['d1']} draws, $c<0$). " for r in no_cross)
-    tex = ["\\begin{table}[htbp]", "\\centering", "\\color{blue}", "\\small", "\\setlength{\\tabcolsep}{4pt}",
-           "\\caption{Joint reconstruction of the field and the plateau values, Example~1: posterior summaries, diagnostics "
-           "and cost with the paper's plateau intervals (Stage A) and with intervals twice as wide (Stage B).}",
-           f"\\label{{{label}}}",
-           "\\begin{tabular}{@{}l" + "c" * len(st) + "@{}}", "\\hline",
-           " & " + " & ".join(f"Stage {r['stage'].split('_')[-1]}" for r in st) + " \\\\", "\\hline"] + rows + [
-           "\\hline", "\\end{tabular}", "", "\\smallskip",
-           "\\parbox{\\linewidth}{\\footnotesize "
-           f"NUTS with a dense mass matrix, target acceptance probability {m['nuts']['target_accept_prob']:g}, maximum tree depth "
-           f"{m['nuts']['max_tree_depth']}, {m['nuts']['warmup_steps']} warm-up iterations and {r0['draws_per_chain']} draws in each of "
-           f"{r0['chains']} chains started from independent prior draws; the plateaus are sampled in unconstrained coordinates with "
-           "the Jacobian term. True values: $c_{\\mathrm{p}}=" + f"{r0['posterior']['c_p']['truth']:g}" + "$, $c_{\\mathrm{n}}="
-           + f"{r0['posterior']['c_n']['truth']:g}" + "$, $d=" + f"{r0['posterior']['d']['truth']:.3f}" + "$ (junction depth at $x=0.5$); "
-           + no_cross +
-           "$^*$: the 90\\,\\% interval (5--95\\,\\% quantiles) does not contain the true value. Post./prior sd: posterior sd "
-           f"divided by the prior sd (interval width$/\\sqrt{{12}}$). Mass near bounds: posterior mass within {100 * NEAR:g}\\,\\% of the "
-           f"interval width of the lower / upper bound (prior mass {100 * NEAR:g}\\,\\% each). " + outside + "Correlations "
-           "over all draws. $\\hat R$ and ESS as in Section~\\ref{subsec:scenario_A}, over all KL coefficients, $c_{\\mathrm{p}}$, "
-           "$c_{\\mathrm{n}}$ and $d$. ESS per $10^3$ solves: minimum bulk or tail ESS per $10^3$ forward-equivalent solves "
-           "$N_F+\\lambda N_A$ ($\\lambda$ the measured ratio of adjoint to forward solve time), for the retained draws / "
-           "including warm-up. Wall-clock time of the four-chain batch, including warm-up.}",
-           "\\end{table}", ""]
-    return tex
-
-
-def md_report(m, recs, ch, fit):
+def md_report(recs, ch, fit):
     names = [f"Stage {r['stage'].split('_')[-1]}" for r in recs]
-    L = [f"# Joint reconstruction, Example 1 (manifest `{m['id']}`)", "",
+    L = ["# Joint reconstruction, Example 1", "",
          "| | " + " | ".join(names) + " |", "|---|" + "---|" * len(recs)]
 
     def row(name, f):
@@ -480,8 +386,6 @@ def md_report(m, recs, ch, fit):
     row("Prior c_p / c_n", lambda r: f"U({r['plateau_bounds']['c_p'][0]:g}, {r['plateau_bounds']['c_p'][1]:g}) / "
                                      f"U({r['plateau_bounds']['c_n'][0]:g}, {r['plateau_bounds']['c_n'][1]:g})")
     row("Meets the criteria", lambda r: "yes" if r["diagnostics"]["passes"] else "**no**")
-    row("First pass (checkpoints)", lambda r: r["diagnostics"]["first_pass"]["statement"]
-        + ("" if r["diagnostics"]["first_pass"].get("first_pass") is None else f"; at {r['diagnostics']['first_pass']['first_pass_draws']} draws per chain"))
     row("max R̂ (quantity)", lambda r: f"{r['diagnostics']['r_hat_max']:.4f} ({r['diagnostics']['r_hat_max_quantity']})")
     row("min bulk ESS (quantity)", lambda r: f"{r['diagnostics']['ess_bulk_min']:.0f} ({r['diagnostics']['ess_bulk_min_quantity']})")
     row("min tail ESS (quantity)", lambda r: f"{r['diagnostics']['ess_tail_min']:.0f} ({r['diagnostics']['ess_tail_min_quantity']})")
@@ -549,7 +453,7 @@ def md_report(m, recs, ch, fit):
         L.append(f"| {q} | " + " | ".join(f"{ch[q][k]['difference']:+.4f} ({ch[q][k]['z']:+.1f})" for k in STATS) + " |")
     L += ["", f"Relative L2 change of the posterior mean field: {100 * ch['fields']['mean_relative_L2']:.2f} %; "
               f"of the std field: {100 * ch['fields']['std_relative_L2']:.1f} %."]
-    kp = fit["known_plateau_production"]
+    kp = fit["known_plateaus"]
     L += ["", "## Data fit", "",
           f"Normalized misfit ||F(θ) − y||² / (σ² N_meas), N_meas = {fit['n_meas']}, with the forward map F of the "
           f"{fit['inversion_mesh_n']}×{fit['inversion_mesh_n']} inversion mesh (data generated on the "
@@ -559,7 +463,7 @@ def md_report(m, recs, ch, fit):
     fr = lambda name, f: L.append(f"| {name} | {f['median']:.3f} | {f['q05']:.3f} | {f['q95']:.3f} | {f['failed_solves']} of {f['n_draws']} |")
     for n, r in zip(names, recs):
         fr(f"{n} (joint)", r["data_fit"])
-    fr(f"Known plateaus, production (`{kp['run']}`)", kp)
+    fr(f"Known plateaus (`{kp['run']}`)", kp)
     L += ["", f"- True field on the inversion mesh: {fit['true_field_inversion_mesh']:.3f}.",
           f"- For reference, noise-free data of the data mesh (the noise realisation alone): {fit['noise_free_data_mesh']:.3f}; "
           f"model error of the inversion mesh: RMS {fit['model_error_rms_sigma']:.3f} σ. Check: the inversion-mesh forward "
@@ -569,34 +473,27 @@ def md_report(m, recs, ch, fit):
 
 
 def main(a):
-    with open(a.manifest) as f:
-        m = json.load(f)
-    names = list(m["stages"])
-    if len(names) != 2:
-        raise ValueError("the manifest must have two stages (narrow and wide plateau intervals)")
-    stages = [load_stage(m, a.manifest, n) for n in names]
-    ex = m["stages"][names[0]]["example"]
-    data = load_data(m["data"][f"ex{ex}"]["path"])
-    if data["_source"]["sha256"] != m["data"][f"ex{ex}"]["sha256"]:
-        raise ValueError("the data file is not the manifest's")
+    data = load_data(a.data)
+    data_sha = data["_source"]["sha256"]
+    stages = [load_stage(a.run_a, "joint_A", data_sha), load_stage(a.run_b, "joint_B", data_sha)]
     V = dl.FunctionSpace(dl.UnitSquareMesh(dl.MPI.comm_self, data["mesh_n"], data["mesh_n"]), "CG", 1)
     M = mass_matrix(V)
     c_true = data["c_true"]
     truth = dict(cp=float(data["cp_true"]), cn=float(data["cn_true"]),
                  depth=float(interface_depth(V, c_true[None, :], x0=0.5, level=0.0, clip=True)[0][0]))
-    paper = {q: tuple(map(float, m["model"]["plateau_bounds_joint"][q])) for q in ("cp", "cn")}
+    paper = {"cp": tuple(map(float, cfg.CP_BOUNDS)), "cn": tuple(map(float, cfg.CN_BOUNDS))}
     recs = [stage_record(st, truth, paper) for st in stages]
     ch = changes(recs[0], recs[1], stages[0]["fields"], stages[1]["fields"], M)
     for st, r in zip(stages, recs):
         r["data_fit"] = data_fit(st["chains"], data)
-    kp_chains, kp = known_plateau_run(a.known_plateau_run, m["data"][f"ex{ex}"]["sha256"])
+    kp_chains, kp = known_plateau_run(a.known_plateau_run, data_sha)
     fit_ref = dict(definition="||F(theta) - y||^2 / (sigma^2 N_meas), forward map F of the inversion mesh",
                    draws_per_posterior=DATA_FIT_DRAWS,
-                   known_plateau_production=dict(run=a.known_plateau_run, chain_content_sha256=kp["chain_content_sha256"],
+                   known_plateaus=dict(run=a.known_plateau_run, chain_content_sha256=kp["chain_content_sha256"],
                                                  chain_code=(kp.get("chain_provenance") or {}).get("code"), **data_fit(kp_chains, data)),
                    **data_fit_truth(data))
     os.makedirs(a.out, exist_ok=True)
-    record = dict(manifest=dict(path=a.manifest, id=m["id"], sha256=file_sha256(a.manifest)), truth=truth,
+    record = dict(runs=dict(A=a.run_a, B=a.run_b), truth=truth,
                   paper_intervals={MD[k]: list(v) for k, v in paper.items()}, near_bound_fraction_of_width=NEAR,
                   stages=recs, changes_first_to_second=ch, data_fit_reference=fit_ref, code=code_version())
     with open(os.path.join(a.out, "tables.json"), "w") as f:
@@ -604,22 +501,19 @@ def main(a):
     with open(os.path.join(a.out, "tables.json")) as f:          # tables are generated from the JSON as written
         record = json.load(f)
     recs, ch = record["stages"], record["changes_first_to_second"]
-    md = md_report(m, recs, ch, record["data_fit_reference"])
+    md = md_report(recs, ch, record["data_fit_reference"])
     with open(os.path.join(a.out, "tables.md"), "w") as f:
         f.write("\n".join(md) + "\n")
-    tex = tex_table(m, recs, a.label)
-    with open(os.path.join(a.out, "joint_table.tex"), "w") as f:
-        f.write(f"% generated by joint_report.py from {a.out}/tables.json (code {record['code']['git_commit'][:7]}); do not edit by hand\n"
-                + "\n".join(tex))
     figures(stages, recs, V, truth, c_true, a.out)
     print("\n".join(md))
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--manifest", default="experiments/production_v3_joint.json")
-    ap.add_argument("--label", default="tab:joint_reconstruction_summary", help="LaTeX label of joint_table.tex")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--known_plateau_run", default="results/nuts_Setting1_Ex1_prod_v1_t095",
-                    help="known-plateau production posterior on the same data, for the data-fit check")
+    ap.add_argument("--run_a", default="results/nuts_Setting2_Ex1_A", help="Stage A run folder (the paper's plateau intervals)")
+    ap.add_argument("--run_b", default="results/nuts_Setting2_Ex1_B", help="Stage B run folder (intervals twice as wide)")
+    ap.add_argument("--data", default="obs/obs_Ex1.pickle")
+    ap.add_argument("--out", default="results/joint")
+    ap.add_argument("--known_plateau_run", default="results/nuts_Setting1_Ex1",
+                    help="known-plateau NUTS posterior on the same data, for the data-fit comparison")
     main(ap.parse_args())

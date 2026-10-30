@@ -1,18 +1,16 @@
 # sensitivity_study.py
 """
-Sensitivity and scaling of the Example 1 posterior with known plateau values (paper Section 6.3.3, Table 3),
-from the runs of the manifests below, made with production.sh. Subcommands:
+Sensitivity and scaling of the Example 1 posterior with known plateau values (paper Section 6.3.3, Table 3), from
+runs made with run_chains.py and postprocessed with postprocess.py (see the README). Subcommands:
 
-  rows  Table 3: NUTS runs that change one setting of the reference run (data-generation mesh, KL truncation
-        N_KL, sigmoid steepness k), each one four-chain batch run alone on the machine:
-          Ref.              experiments/study_k_v1.json, stage k14
-          Data 96, 384      experiments/study_timing_v1.json, stages data96, data384
-          N_KL = 24, 48, 96 experiments/study_timing_v1.json, stages nkl24, nkl48, nkl96
-          k = 10            experiments/study_k_v1_k10r.json, stage k10
-          k = 20, 28        experiments/study_k_v1.json, stages k20, k28
-        -> <out>/sensitivity.{json,md}; make_paper_tables.py writes the LaTeX table from sensitivity.json.
-  pcn   pCN at the fixed production beta and lengths for N_KL = 24, 48, 96 (experiments/study_pcn_nkl_v1.json),
-        next to the N_KL = 12 production pCN run (experiments/production_v1.json, stage ex1_pcn).
+  rows  Table 3: NUTS runs (four chains of 500 draws) that change one setting of the reference run (data-generation
+        mesh, KL truncation N_KL, sigmoid steepness k); each run is one four-chain batch run alone on the machine.
+        Run folders (default, or --run LABEL=FOLDER): Ref. results/nuts_Setting1_Ex1_ref, Data 96 ..._data96,
+        Data 384 ..._data384, N_KL 24 ..._nkl24, N_KL 48 ..._nkl48, N_KL 96 ..._nkl96, k 10 ..._k10, k 20 ..._k20,
+        k 28 ..._k28.
+        -> <out>/sensitivity.{json,md} and <out>/table3_sensitivity.tex
+  pcn   pCN with the fixed step and lengths of Example 1 (beta = 0.431, four chains of 500 000 draws) for N_KL = 12
+        (results/pcn_Setting1_Ex1, the Example 1 run), 24, 48 and 96 (results/pcn_Setting1_Ex1_nkl24, ...).
         -> <out>/pcn_nkl.{json,md}
 
 Definitions (paper Section 6.3): rank-normalized split R-hat, bulk and tail ESS (ArviZ); minimum ESS = smallest
@@ -22,41 +20,35 @@ lambda the run's own ratio of mean adjoint to mean forward solve time, for the r
 warm-up/burn-in; ESS per wall-clock second of the four-chain batch (<run>_batch.json), including warm-up.
 Model error: RMS difference between the noise-free data of the data-generation and the inversion forward maps, in
 units of sigma_noise (stored in the data file).
-Usage: python sensitivity_study.py rows | pcn [--out results/sensitivity_ex1]
+Usage: python sensitivity_study.py rows | pcn [--out results/sensitivity] [--run LABEL=FOLDER ...]
 """
 import argparse
-import hashlib
 import json
+import math
 import os
 
 import numpy as np
 
-ROWS = [("Ref.", "experiments/study_k_v1.json", "k14"),
-        ("Data 96", "experiments/study_timing_v1.json", "data96"),
-        ("Data 384", "experiments/study_timing_v1.json", "data384"),
-        ("N_KL 24", "experiments/study_timing_v1.json", "nkl24"),
-        ("N_KL 48", "experiments/study_timing_v1.json", "nkl48"),
-        ("N_KL 96", "experiments/study_timing_v1.json", "nkl96"),
-        ("k 10", "experiments/study_k_v1_k10r.json", "k10"),
-        ("k 20", "experiments/study_k_v1.json", "k20"),
-        ("k 28", "experiments/study_k_v1.json", "k28")]
-PCN_ROWS = [("N_KL 12", "experiments/production_v1.json", "ex1_pcn")] + [
-    (f"N_KL {n}", "experiments/study_pcn_nkl_v1.json", f"pcn_nkl{n}") for n in (24, 48, 96)]
+ROWS = {"Ref.": "results/nuts_Setting1_Ex1_ref", "Data 96": "results/nuts_Setting1_Ex1_data96",
+        "Data 384": "results/nuts_Setting1_Ex1_data384", "N_KL 24": "results/nuts_Setting1_Ex1_nkl24",
+        "N_KL 48": "results/nuts_Setting1_Ex1_nkl48", "N_KL 96": "results/nuts_Setting1_Ex1_nkl96",
+        "k 10": "results/nuts_Setting1_Ex1_k10", "k 20": "results/nuts_Setting1_Ex1_k20", "k 28": "results/nuts_Setting1_Ex1_k28"}
+PCN_ROWS = {"N_KL 12": "results/pcn_Setting1_Ex1", "N_KL 24": "results/pcn_Setting1_Ex1_nkl24",
+            "N_KL 48": "results/pcn_Setting1_Ex1_nkl48", "N_KL 96": "results/pcn_Setting1_Ex1_nkl96"}
+TEX_LABELS = {"Ref.": "Ref.", "Data 96": "Data 96", "Data 384": "Data 384", "N_KL 24": "$N_{\\mathrm{KL}}=24$",
+              "N_KL 48": "$N_{\\mathrm{KL}}=48$", "N_KL 96": "$N_{\\mathrm{KL}}=96$", "k 10": "$k=10$", "k 20": "$k=20$", "k 28": "$k=28$"}
 DEPTH_PROBS = (0.05, 0.5, 0.95, 0.99)
 
 
-def run_dir(manifest, stage):
-    """Run folder of a manifest stage, as named by production.sh; the chains must have been run with this manifest."""
-    from io_utils import load_chains
-    with open(manifest, "rb") as f:
-        raw = f.read()
-    m, sha = json.loads(raw), hashlib.sha256(raw).hexdigest()
-    s = m["stages"][stage]
-    run = f"results/{s['method']}_Setting{s['setting']}_Ex{s['example']}{m['output_tag']}{s.get('tag', '')}"
-    for c in load_chains(run):
-        if c["provenance"]["manifest"]["sha256"] != sha:
-            raise ValueError(f"{run}: chain {c['info']['chain']} was not run with {manifest} as it is now")
-    return run
+def _runs(defaults, overrides):
+    """Run folders by label, with --run LABEL=FOLDER overrides."""
+    runs = dict(defaults)
+    for o in overrides:
+        label, folder = o.split("=", 1)
+        if label not in runs:
+            raise ValueError(f"unknown row {label!r}; rows: {', '.join(runs)}")
+        runs[label] = folder
+    return runs
 
 
 def _diag_block(diag, rows):
@@ -166,9 +158,43 @@ def _dump(out, name, obj, md):
     print("\n".join(md))
 
 
+def _sig2(x):
+    s = f"{x:.2g}"
+    if 'e' in s: s = f"{x:.2f}"
+    if '.' not in s and len(s) == 1: s += '.0'
+    return s
+
+
+def table3(out, src):
+    """Table 3 of the paper (LaTeX) from the rows of sensitivity.json."""
+    def row3(lab, r):
+        e, dep, t = r['efficiency_per_1000_forward_equivalents'], r['depth'], r['timing']
+        assert r['diagnostics_all']['passes'] and t.get('min_ess_per_wall_clock_s') is not None, r['run']
+        return (f"{lab} & {r['RE']:.3f}/{r['SSIM']:.3f} & {1e3*dep['mean']:.0f}$\\pm${1e3*dep['sd']:.0f} & {r['spread']['rms_pointwise_std']:.3f} & "
+                f"{_sig2(e['sampling'])}/{_sig2(e['total'])} & {r['sampler']['divergences']} & {t['min_ess_per_wall_clock_s']:.2f}" + r" \\")
+    rows3 = [row3(TEX_LABELS[k], r) for k, r in out.items()]
+    used = list(out.values())
+    rh = math.ceil(max(r['diagnostics_all']['r_hat_max'] for r in used) * 1000) / 1000     # bound, rounded up
+    me = math.floor(min(r['diagnostics_all']['min_ess'] for r in used))                    # bound, rounded down
+    foot3 = (r"Ref.: data mesh 192, $N_{\mathrm{KL}}=12$, $k=14$; each other row changes one of these (Data: data-generation mesh; "
+             r"the inversion mesh is $48\times48$ throughout). $10^3d$: posterior mean $\pm$ sd of the junction depth. "
+             rf"All runs meet the convergence criteria ($\max\hat R\le{rh:.3f}$, minimum ESS $\ge{me}$). "
+             r"ESS/$10^3$ solves: minimum ESS per $10^3$ forward-equivalent solves, retained draws / including warm-up; "
+             r"ESS/s: per wall-clock second, including warm-up.")
+    t3 = (f"% generated by sensitivity_study.py from {src}; do not edit by hand\n"
+          "\\begin{table}[t]\n\\centering\n\\color{blue}\n\\small\n\\setlength{\\tabcolsep}{4pt}\n"
+          "\\caption{Sensitivity of the Example~1 posterior (known plateaus) to the data mesh, the KL truncation and the sigmoid steepness.}\n"
+          "\\label{tab:ex1_sensitivity}\n\\begin{tabular}{@{}lcccccc@{}}\n\\hline\n"
+          "Run & RE/SSIM & $10^3d$ & RMS std & ESS/$10^3$ solves & Div. & ESS/s \\\\\n\\hline\n" + "\n".join(rows3) +
+          "\n\\hline\n\\end{tabular}\n\n\\smallskip\n\\parbox{0.97\\linewidth}{\\footnotesize " + foot3 + "}\n\\end{table}\n")
+    with open(os.path.join(os.path.dirname(src), "table3_sensitivity.tex"), "w") as f:
+        f.write(t3)
+    print(t3)
+
+
 def rows(a):
     M, w = _mass()
-    out = {label: row_metrics(run_dir(man, stage), M, w) for label, man, stage in ROWS}
+    out = {label: row_metrics(run, M, w) for label, run in _runs(ROWS, a.run).items()}
     md = ["# Example 1, known plateaus: sensitivity (Table 3)", "",
           "Minimum ESS over all KL coefficients and d; efficiency per 10^3 forward-equivalent solves, retained draws / "
           "including warm-up; in the last column over the first 12 KL coefficients and d.", "",
@@ -182,16 +208,19 @@ def rows(a):
                   f"| {r['spread']['rms_pointwise_std']:.4f} | {da['r_hat_max']:.4f} | {da['ess_bulk_min']:.0f} / {da['ess_tail_min']:.0f} "
                   f"| {e['sampling']:.2f} / {e['total']:.2f} | {r['sampler']['divergences']} | {t['wall_clock_s']:.0f} "
                   f"| {t['min_ess_per_wall_clock_s']:.3f} | {e12['sampling']:.2f} / {e12['total']:.3f} |")
-    _dump(a.out, "sensitivity", dict(manifests=sorted({m for _, m, _ in ROWS}), rows=out), md)
+    _dump(a.out, "sensitivity", dict(rows=out), md)
+    src = os.path.join(a.out, "sensitivity.json")
+    with open(src) as f:          # the table is generated from the JSON as written
+        table3(json.load(f)["rows"], src)
 
 
 def pcn(a):
     M, w = _mass()
-    out = {label: row_metrics(run_dir(man, stage), M, w) for label, man, stage in PCN_ROWS}
+    out = {label: row_metrics(run, M, w) for label, run in _runs(PCN_ROWS, a.run).items()}
     betas = {round(r["sampler"]["beta"][0], 12) for r in out.values()}
     if len(betas) > 1:
         raise ValueError(f"the runs use different beta: {betas}")
-    md = ["# pCN at fixed beta against N_KL, production lengths (Example 1, known plateaus)", "",
+    md = ["# pCN at fixed beta against N_KL, lengths of Example 1 (known plateaus)", "",
           "Minimum ESS per 10^3 PDE solves, retained draws / including the discarded steps.", "",
           "| Row | Run | β | Chains × draws | Mean acceptance probability | max R̂ (quantity) | Min ESS | Meets the criteria "
           "| Efficiency | max R̂, first 12 and d | Min ESS, first 12 and d | Meets the criteria, first 12 and d | Efficiency, first 12 and d |",
@@ -203,12 +232,13 @@ def pcn(a):
                   f"| {np.mean(r['sampler']['mean_acceptance_probability']):.4f} | {da['r_hat_max']:.4f} ({da['r_hat_max_quantity']}) "
                   f"| {da['min_ess']:.0f} | {'yes' if da['passes'] else 'no'} | {e['sampling']:.3f} / {e['total']:.3f} "
                   f"| {d12['r_hat_max']:.4f} | {d12['min_ess']:.0f} | {'yes' if d12['passes'] else 'no'} | {e12['sampling']:.3f} / {e12['total']:.3f} |")
-    _dump(a.out, "pcn_nkl", dict(manifests=sorted({m for _, m, _ in PCN_ROWS}), rows=out), md)
+    _dump(a.out, "pcn_nkl", dict(rows=out), md)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["rows", "pcn"])
-    ap.add_argument("--out", default="results/sensitivity_ex1")
+    ap.add_argument("--out", default="results/sensitivity")
+    ap.add_argument("--run", action="append", default=[], metavar="LABEL=FOLDER", help="run folder of a row (default: see above)")
     a = ap.parse_args()
     {"rows": rows, "pcn": pcn}[a.cmd](a)
