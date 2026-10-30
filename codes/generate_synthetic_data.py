@@ -1,409 +1,95 @@
 # generate_synthetic_data.py
+"""
+Synthetic electrode data for the straight (Example 1) and curved (Example 2) junctions (Section 6.1),
+and for two prior stress tests (Examples 3 and 4: the junction of Example 1 shifted towards the
+bottom and the top contact, into the tails of the prior junction depth).
+The data are computed on a finer mesh than the inversion mesh (no inverse crime).
+Usage: python generate_synthetic_data.py [--examples 1 2] [--data_mesh 192]
+"""
+import argparse
 import os
-import pickle
+
 import numpy as np
 import dolfin as dl
 
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-import matplotlib.colors as mcolors
-from matplotlib.gridspec import GridSpec
-import matplotlib.ticker as ticker
-
-from pde_model import TopFluxPDE
-from matern_torch import TorchMaternCov
+import config as cfg
+from forward_model import PoissonBoltzmannModel
+from io_utils import save_pickle
+from plotting import plot_field, TRUE_INTERFACE
 
 
-norm = mcolors.PowerNorm(gamma=0.7)  # < 1 → brighter
+JUNCTIONS = {
+    1: lambda x: 0.6 - 0.1 * x,                              # Example 1, straight
+    2: lambda x: 0.6 - 0.1 * x + 0.2 * np.sin(np.pi * x),    # Example 2, curved
+    3: lambda x: 0.3 - 0.1 * x,                              # stress test: Example 1 near the bottom contact
+    4: lambda x: 0.9 - 0.1 * x,                              # stress test: Example 1 near the top (electrode) contact
+}
 
-dl.set_log_level(50)
 
-mpl.rcParams.update({
-    "font.family": "serif",
-    "font.serif": ["STIX Two Text", "STIXGeneral", "DejaVu Serif"],
-    "mathtext.fontset": "stix",
-})
+def true_doping(V, example, cp=cfg.CP_TRUE, cn=cfg.CN_TRUE, width=cfg.INTERFACE_WIDTH):
+    """c(x, y) = c_p + (c_n - c_p) (1 + tanh((y - y_J(x)) / width)) / 2 with the junction y_J of JUNCTIONS."""
+    if example not in JUNCTIONS:
+        raise ValueError(f"example must be one of {sorted(JUNCTIONS)}")
+    x, y = V.tabulate_dof_coordinates().T
+    return cp + (cn - cp) * 0.5 * (1.0 + np.tanh((y - JUNCTIONS[example](x)) / width))
 
-def resize_cax(cax, shrink=0.85, shift=0.03):
+
+def make_data(example, data_mesh_n=cfg.DATA_MESH_N, noise_level=cfg.NOISE_LEVEL, seed=cfg.DATA_SEED,
+              width=cfg.INTERFACE_WIDTH):
     """
-    shrink < 1 makes colorbar shorter.
-    shift moves it upward (positive) / downward (negative) as a fraction of its height.
+    y = G_fine(c_true) + eps,  eps ~ N(0, sigma^2 I),  sigma = rho ||G_fine(c_true)||_2 / sqrt(N_meas),
+    where G_fine is the forward map on the data mesh. Also returns the inversion-mesh model.
     """
-    pos = cax.get_position()
-    new_h = pos.height * shrink
-    new_y = pos.y0 + (pos.height - new_h) * 0.5 + shift * pos.height
-    cax.set_position([pos.x0, new_y, pos.width, new_h])
+    fine = PoissonBoltzmannModel(data_mesh_n, cfg.EPS, cfg.DELTA, cfg.ELECTRODES)
+    y_true = fine.forward(true_doping(fine.V, example, width=width), cfg.CP_TRUE, cfg.CN_TRUE)
+    sigma = noise_level * np.linalg.norm(y_true) / np.sqrt(y_true.size)
+    y_obs = y_true + sigma * np.random.default_rng(seed).standard_normal(y_true.size)
 
+    # Truth on the inversion mesh (for RE/SSIM) and the inversion model's discretisation error
+    model = PoissonBoltzmannModel(cfg.MESH_N, cfg.EPS, cfg.DELTA, cfg.ELECTRODES)
+    c_true = true_doping(model.V, example, width=width)
+    y_model = model.forward(c_true, cfg.CP_TRUE, cfg.CN_TRUE)
 
-class SmoothTwoPhase(dl.UserExpression):
-    """
-    Smooth 2-phase doping profile C(x,y).
-
-    example = 1:
-        y_curve = base + slope * x
-
-    example = 2:
-        y_curve = base + slope * x + 0.2 sin(pi x)
-    """
-
-    def __init__(
-        self,
-        C_n=1.0,
-        C_p=-2.0,
-        base=0.6,
-        slope=-0.1,
-        width=0.05,
-        example=1,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-
-        self.C_n = float(C_n)
-        self.C_p = float(C_p)
-        self.base = float(base)
-        self.slope = float(slope)
-        self.width = float(width)
-        self.example = int(example)
-
-    def eval(self, values, x):
-        xc, yc = float(x[0]), float(x[1])
-
-        if self.example == 1:
-            y_curve = self.base + self.slope * xc
-
-        elif self.example == 2:
-            y_curve = self.base + self.slope * xc + 0.2 * np.sin(np.pi * xc)
-
-        else:
-            raise ValueError("example must be 1 or 2.")
-
-        s = 0.5 * (1.0 + np.tanh((yc - y_curve) / self.width))
-
-        values[0] = self.C_p + (self.C_n - self.C_p) * s
-
-    def value_shape(self):
-        return ()
-
-def plot_and_save_C_field(C_fun, save_path="Fig_true_C.png", title=None):
-    """
-    Plot a single C-field with a dedicated colorbar axis, similar in style
-    to the multi-panel example.
-    """
-    fig = plt.figure(figsize=(4.2, 3.75))
-    gs = GridSpec(1, 2, figure=fig, width_ratios=[1, 0.05])
-    gs.update(wspace=0.18)
-
-    ax = fig.add_subplot(gs[0, 0])
-    cax = fig.add_subplot(gs[0, 1])
-
-    # make colorbar a bit shorter and vertically centered
-    pos = cax.get_position()
-    cax.set_position([pos.x0, pos.y0 + 0.10, pos.width, pos.height * 0.74])
-
-    # main field plot
-    im = dl.plot(
-        C_fun,
-        axes=ax,
-        cmap="viridis"
-    )
-
-    # contour for interface c(x)=0
-    mesh = C_fun.function_space().mesh()
-    coords = mesh.coordinates()
-    cells = mesh.cells()
-    C_vals = C_fun.compute_vertex_values(mesh)
-
-    ax.tricontour(
-        coords[:, 0],
-        coords[:, 1],
-        cells,
-        C_vals,
-        levels=[0.0],
-        colors="black",
-        linewidths=2.0,
-    )
-
-    ax.set_xlabel("$x$", fontsize=14)
-    ax.set_ylabel("$y$", fontsize=14)
-    ax.set_xticks([0.0, 0.5, 1.0])
-    ax.set_yticks([0.0, 0.5, 1.0])
-
-    for sp in ax.spines.values():
-        sp.set_visible(True)
-        sp.set_color("black")
-        sp.set_linewidth(1)
-
-    ax.tick_params(direction="out", length=3, width=1, labelsize=14)
-
-    if title is not None:
-        ax.set_title(title, fontsize=14)
-
-    cb = fig.colorbar(im, cax=cax)
-    cb.set_label(r"$c(\boldsymbol{x})$", fontsize=14)
-    cb.ax.tick_params(labelsize=14)
-
-    fmt = ticker.ScalarFormatter(useMathText=True)
-    fmt.set_powerlimits((0, 0))
-    fmt.set_useOffset(False)
-    cb.formatter = fmt
-    cb.set_ticks([-2.0, -1.0, 0.0, 1.0])
-    cb.update_ticks()
-
-    plt.savefig(save_path, bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-    print(f"Saved C-field figure: {save_path}")
-    
-    
-def make_synth_data(
-    save_as="obs_synth_top.pickle",
-    true_fig_save_path="./obs/Fig_true_C",
-    mesh_N=48,
-    Lx=1.0,
-    C_n=1.0,
-    C_p=-2.0,
-    lam=1.0,
-    delta=1.0,
-    k_sigmoid=2e1,
-    noise_level=0.05,
-    width=0.035,
-    example=1,
-    show=True,
-    seed=123,
-):
-    
-        
-    # BCs consistent with your earlier choice
-    V_top = np.asinh(C_n / (2.0 * delta**2))
-    V_bottom = np.asinh(C_p / (2.0 * delta**2))
-
-    # # PDE (takes C as input)
-    # build PDE first
-    pde = TopFluxPDE(
-        N_points=mesh_N,
-        Lx=Lx,
-        V_top=V_top,
-        V_bottom=V_bottom,
-        lam=lam,
-        delta=delta,
-    )
-    
-    # prior on SAME mesh
-    prior = TorchMaternCov(
-        pde.mesh,
-        push_forward_method="sigmoid",
-        C_p = C_p,
-        C_n=C_n,
-        k=k_sigmoid,
-    )
-    
-    # N_full = pde.V.dim()
-    # n9978, r9978 = prior.variance_retention(rho=0.9978, N_full=N_full, corr_len=0.15, nu=3)
-    # N_KL = n9978
-    # print("Modes for 99.9% variance:", n9978, " achieved:", r9978)
-    
-    N_KL = 30
-    
-   
-     
-    # True C
-    expr = SmoothTwoPhase(
-        C_n=C_n,
-        C_p=C_p,
-        width=width,
-        example=example,
-        degree=2,
-    )
-    
-    C_fun = dl.interpolate(expr, pde.V)
-    C_true = C_fun.vector().get_local()
-    
-    vtk_file = dl.File(true_fig_save_path + '.pvd')
-    C_fun.rename("C", "doping")
-    vtk_file << C_fun
-
-    
-    if show: 
-        fig, ax = plt.subplots(figsize=(4.2, 3.75))
-
-        # --- enforce correct color scaling ---
-        im = dl.plot(
-            C_fun,
-            axes=ax,
-            cmap="viridis",
-            norm=norm,
-            vmin=-2.0,
-            vmax=1.0
-        )
-        
-        # --- interface (c = 0 contour) ---
-        mesh = C_fun.function_space().mesh()
-        coords = mesh.coordinates()
-        cells = mesh.cells()
-        C_vals = C_fun.compute_vertex_values(mesh)
-        
-        ax.tricontour(
-            coords[:, 0],
-            coords[:, 1],
-            cells,
-            C_vals,
-            levels=[0.0],
-            colors="black",
-            linewidths = 1.5,
-        )
-        
-        # --- axis styling ---
-        ax.set_xlabel("$x$", fontsize=16)
-        ax.set_ylabel("$y$", fontsize=16)
-        ax.set_xticks([0.0, 0.5, 1.0])
-        ax.set_yticks([0.0, 0.5, 1.0])
-        
-        for sp in ax.spines.values():
-            sp.set_visible(True)
-            sp.set_color("black")
-            sp.set_linewidth(1.0)
-        
-        ax.tick_params(direction="out", length=3, width=1, labelsize=14)
-        
-        # --- colorbar (attached to same axis) ---
-        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        # cb.set_label(r"$c(\boldsymbol{x})$", fontsize=14)
-        cb.set_ticks([-2.0, -1.0, 0.0, 1.0])
-        cb.ax.tick_params(labelsize=14)
-        plt.tight_layout()
-        # --- save ---
-        plt.savefig( true_fig_save_path + '.png', bbox_inches="tight", dpi=300)
-        
-        # =========================================================
-        # 3D plot
-        # =========================================================
-        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-        import matplotlib.tri as mtri
-        
-        fig3d = plt.figure(figsize=(5.5, 4.6))
-        ax3d = fig3d.add_subplot(111, projection="3d")
-        
-        triang = mtri.Triangulation(coords[:, 0], coords[:, 1], cells)
-        
-        surf = ax3d.plot_trisurf(
-            triang,
-            C_vals,
-            cmap="viridis",
-            vmin=-2.0,
-            vmax=1.0,
-            linewidth=0.1,
-            edgecolor="k",
-            antialiased=True,
-        )
-        
-        # --- axis styling ---
-        ax3d.set_xlabel("$x$", fontsize=13, labelpad=6)
-        ax3d.set_ylabel("$y$", fontsize=13, labelpad=6)
-        ax3d.set_zlabel(r"$c(\boldsymbol{x})$", fontsize=13, labelpad=8)
-        
-        ax3d.set_xlim(0.0, 1.0)
-        ax3d.set_ylim(0.0, 1.0)
-        ax3d.set_zlim(-2.0, 1.0)
-        
-        ax3d.set_xticks([0.0, 0.5, 1.0])
-        ax3d.set_yticks([0.0, 0.5, 1.0])
-        ax3d.set_zticks([-2.0, -1.0, 0.0, 1.0])
-        
-        # good MATLAB-like viewing angle
-        ax3d.view_init(elev=28, azim=-135)
-        
-        # cleaner panes/grid
-        ax3d.tick_params(labelsize=11)
-        
-        # --- colorbar ---
-        cb3d = fig3d.colorbar(surf, ax=ax3d, fraction=0.046, pad=0.08)
-        cb3d.set_label(r"$c(\boldsymbol{x})$", fontsize=13)
-        cb3d.set_ticks([-2.0, -1.0, 0.0, 1.0])
-        cb3d.ax.tick_params(labelsize=11)
-        
-        # --- save 3D ---
-        plt.savefig(true_fig_save_path + "_3D.png", bbox_inches="tight", dpi=300)
-        plt.show()
-
-    # Solve & measure y = u_y on top dofs
-    pde.solve_state(C_true, cP = C_p, cN = C_n, zero_guess=True)
-    y_true = pde.top_flux_facet_vec()
-    
-    if show:
-        plt.figure()
-        plt.plot(y_true, "-o")
-        plt.title("Top data (noiseless): y = u_y on top dofs")
-        plt.xlabel("top dof index")
-        plt.ylabel("u_y")
-        plt.tight_layout()
-        plt.show()
-
-    # Noise (noise_level is % of the RMS variability (not the mean))
-    np.random.seed(seed)
-    y0 = y_true - y_true.mean()
-    sigma = noise_level * np.linalg.norm(y0) / np.sqrt(y0.size)   # = noise_level * RMS(demeaned)
-    noise = sigma * np.random.randn(y_true.size)
-    y_obs = y_true + noise
-    
-    err = 100*np.linalg.norm(y_obs - y_true)/np.linalg.norm(y0)   # consistent
-    print(err)
-    
-    if show:
-        plt.figure()
-        plt.plot(y_true, label="y_true")
-        plt.plot(y_obs, label="y_obs")
-        plt.legend()
-        plt.title("Noisy observations on top boundary")
-        plt.tight_layout()
-        plt.show()
-
-    obs = {
-        "mesh_N": mesh_N,
-        "N_x": mesh_N,           # keep backward compatibility
-        "N_KL": N_KL,
-        "Lx": float(Lx),
-        "lambda_val": float(lam),
-        "delta_val": float(delta),
-        "k": float(k_sigmoid),
-        "V_top": float(V_top),
-        "V_bottom": float(V_bottom),
-        "C_n": float(C_n),
-        "C_p": float(C_p),
-        "C_true": C_true,
+    data = {
+        "example": example,
+        "mesh_n": cfg.MESH_N,
+        "data_mesh_n": data_mesh_n,
+        "eps": cfg.EPS,
+        "delta": cfg.DELTA,
+        "electrodes": cfg.ELECTRODES,
+        "cp_true": cfg.CP_TRUE,
+        "cn_true": cfg.CN_TRUE,
+        "c_true": c_true,
         "y_true": y_true,
         "y_obs": y_obs,
-        "noise": noise,
-        "sigma": float(sigma),
-        "obs_grid": "top_facets",
-        "meta": {
-        "source": "smooth_two_phase",
-        "example": int(example),
-        "width": float(width),
-        "noise_level": float(noise_level),},
-        "seed": int(seed),
+        "sigma": sigma,
+        "noise_level": noise_level,
+        "interface_width": width,
+        "noise_definition": "sigma = rho * ||y_true||_2 / sqrt(N_meas)",
+        "seed": seed,
+        "model_error": y_model - y_true,      # inversion-mesh minus data-mesh noise-free data
     }
-
-    os.makedirs("./obs", exist_ok=True)
-    path = os.path.join("./obs", save_as)
-    with open(path, "wb") as f:
-        pickle.dump(obs, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    print(f"Saved: {path}")
-    return obs
+    return data, model
 
 
 if __name__ == "__main__":
-    
-    Example = 1
-    # --------------------------------------------------
-    # Example 1: Straigh Junction
-    # Example 2: Curved Junction
-    # --------------------------------------------------
-    make_synth_data(
-        save_as=f"obs_synth_top_Ex{Example}.pickle",
-        true_fig_save_path=f"./obs/Fig_true_C_Ex{Example}",
-        example=Example,
-        show=True,
-    )
-
-    
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--examples", type=int, nargs="+", default=[1, 2])
+    ap.add_argument("--data_mesh", type=int, default=cfg.DATA_MESH_N)
+    ap.add_argument("--noise_level", type=float, default=cfg.NOISE_LEVEL, help="rho (default config.NOISE_LEVEL)")
+    ap.add_argument("--width", type=float, default=cfg.INTERFACE_WIDTH, help="tanh width of the true junction")
+    a = ap.parse_args()
+    for example in a.examples:
+        data, model = make_data(example, a.data_mesh, a.noise_level, width=a.width)
+        e = data["model_error"]
+        print(f"Example {example} (data mesh {a.data_mesh}): N_meas = {model.n_meas}, sigma = {data['sigma']:.4e} "
+              f"({100 * data['sigma'] / np.sqrt(np.mean(data['y_true']**2)):.2f}% of RMS(y)); "
+              f"inversion-mesh model error: RMS = {np.sqrt(np.mean(e**2)) / data['sigma']:.3f} sigma, "
+              f"max = {np.abs(e).max() / data['sigma']:.3f} sigma")
+        save_pickle(cfg.data_file(example, a.data_mesh, a.noise_level, a.width), data)
+        if a.data_mesh == cfg.DATA_MESH_N:
+            plot_field(model.V, data["c_true"], os.path.join(cfg.OBS_DIR, f"true_doping_Ex{example}.png"),
+                       contours=[(data["c_true"], TRUE_INTERFACE)])
+            c_fun = dl.Function(model.V, name="c")
+            c_fun.vector().set_local(data["c_true"])
+            dl.File(os.path.join(cfg.OBS_DIR, f"true_doping_Ex{example}.pvd")) << c_fun

@@ -1,0 +1,141 @@
+{
+  "id": "study_pcn_nkl_v1",
+  "status": "final",
+  "created": "2026-10-28",
+  "purpose": "Stage 6b of the Example 1 sensitivity study (user go-ahead, 28 Oct 2026; Reviewer 2: dimension-robustness of pCN): pCN at the fixed production step beta = 0.4313 (8 x the tuned beta at N_KL = 12) with the production run lengths (5000 + 30 000 discarded steps, 500 000 retained draws per chain, four chains, seeds 0-3, prior-draw starts) at N_KL = 24, 48 and 96, reported next to the N_KL = 12 production pCN run (production_v1, results/pcn_Setting1_Ex1_prod_v1). The earlier 4 x 100 000 runs at these N_KL did not meet the convergence criteria. Declared and frozen before the runs; a change of any setting requires a new manifest id and output tag.",
+  "output_tag": "_study_pcn_nkl_v1",
+  "model": {
+    "inversion_mesh_n": 48,
+    "eps": 1.0,
+    "delta": 1.0,
+    "electrodes": "16 electrodes I_l = (3(l-1)/48, (3(l-1)+1)/48), l = 1..16, on y = 1",
+    "prior": {
+      "mean": "trend a(2y - 1)",
+      "mean_a": 2.0,
+      "tau": 16.0,
+      "alpha": 4.0,
+      "n_kl": 12,
+      "k": 14.0,
+      "eigenvalue_normalisation": "sum of the retained lambda_j = 1",
+      "n_kl_note": "N_KL = 12 is the production value checked against config.py; the stages override n_kl"
+    },
+    "plateaus_known": {
+      "cp": -2.0,
+      "cn": 1.0
+    },
+    "plateau_bounds_joint": {
+      "cp": [
+        -2.5,
+        -1.5
+      ],
+      "cn": [
+        0.5,
+        1.5
+      ]
+    },
+    "plateau_bounds_note": "joint-setting bounds of config.py, checked by the driver but not used by the v1 stages"
+  },
+  "data": {
+    "ex1": {
+      "path": "obs/obs_Ex1.pickle",
+      "sha256": "db49f165614f4aad8fcfc6ab27ae56762c548cfe83c88b7db0597cb2d791d8bc"
+    },
+    "data_mesh_n": 192,
+    "noise_level": 0.01,
+    "noise_definition": "sigma = rho ||y_true||_2 / sqrt(N_meas)",
+    "noise_seed": 123,
+    "truth_interface_width": 0.035,
+    "note": "existing observation files; their bytes are tracked in git and must not be regenerated"
+  },
+  "chains": {
+    "count": 4,
+    "seed": 0,
+    "seed_rule": "chain c uses seed + c",
+    "initialisation": "prior_draw"
+  },
+  "nuts": {
+    "note": "not used"
+  },
+  "pcn": {
+    "n_warmup": 5000,
+    "n_burn": 30000,
+    "n_samples_cap": 500000,
+    "checkpoint_every": 50000,
+    "tuning": "none during the production run (fixed beta)",
+    "beta": {
+      "ex1": 0.43131272512554686
+    },
+    "beta_rule": "8 x the mean tuned beta (0.05391409064069336) of 4 tuned chains (target acceptance 0.234), selected from the Example 1 step-size sweep (1/2, 2, 3, 4, 6, 8, 12 x) by the largest smallest bulk-or-tail ESS over all monitored quantities per PDE solve (rule chosen after the pilot)",
+    "beta_source": {
+      "ex1": "results/pcn_Setting1_Ex1_pilot_beta_x8 (report Section 6.4)"
+    },
+    "note": "beta, run lengths and seeds as in production_v1 (stage ex1_pcn); only N_KL differs"
+  },
+  "stages": {
+    "pcn_nkl24": {
+      "example": 1,
+      "setting": 1,
+      "method": "pcn",
+      "prior": {
+        "n_kl": 24
+      },
+      "tag": "_nkl24"
+    },
+    "pcn_nkl48": {
+      "example": 1,
+      "setting": 1,
+      "method": "pcn",
+      "prior": {
+        "n_kl": 48
+      },
+      "tag": "_nkl48"
+    },
+    "pcn_nkl96": {
+      "example": 1,
+      "setting": 1,
+      "method": "pcn",
+      "prior": {
+        "n_kl": 96
+      },
+      "tag": "_nkl96"
+    }
+  },
+  "diagnostics": {
+    "monitored": "all KL coefficients and the junction depth at x = 0.5; c_p and c_n in the joint setting",
+    "r_hat_below": 1.01,
+    "ess_bulk_at_least": 400,
+    "ess_tail_at_least": 400,
+    "undefined": "an undefined R-hat or ESS of any monitored quantity means not passed",
+    "checkpoints": "retrospective, on prefixes of the capped runs; costs from per-draw records; first pass reported with persistence, or 'not reached within the cap'"
+  },
+  "divergences": {
+    "follow_up_rule": "more than 0.5 % of the retained draws, or at least 3 divergences with 75 % or more in one chain",
+    "handling": "report count, chain and location; keep the output; investigate the states; never change settings silently"
+  },
+  "timing": {
+    "batches": "one four-chain sampler batch at a time, no other heavy jobs on the machine",
+    "threads": {
+      "OMP_NUM_THREADS": 1,
+      "MKL_NUM_THREADS": 1,
+      "OPENBLAS_NUM_THREADS": 1,
+      "VECLIB_MAXIMUM_THREADS": 1,
+      "NUMEXPR_NUM_THREADS": 1,
+      "torch": 1
+    },
+    "reported": [
+      "aggregate worker time (sum over chains), sampling only and including warm-up",
+      "actual batch elapsed time from launch to the last chain end (epoch timestamps)",
+      "longest single chain"
+    ],
+    "excluded_from_sampler_timers": "model construction and KL set-up (included in the batch elapsed time)"
+  },
+  "failure_handling": "outputs are validated with check_run.py --production; an invalid output stops the driver and is kept for inspection; a valid run that fails the diagnostics or needs divergence follow-up is kept and flagged, never silently rerun with other settings",
+  "frozen": "2026-10-28",
+  "scope": "Example 1, known plateaus (Setting 1): pCN at fixed beta at N_KL = 24, 48, 96 (stages pcn_nkl24, pcn_nkl48, pcn_nkl96), one batch at a time.",
+  "predeclared": {
+    "reporting": "for each N_KL next to the N_KL = 12 production run: mean acceptance probability and accepted fraction per chain, max R-hat, minimum bulk and tail ESS and their quantities, minimum ESS per 10^3 PDE solves (retained draws / including the discarded steps), checkpoint first pass, batch wall-clock time and machine load",
+    "rules": "the convergence thresholds of production_v1 apply unchanged (R-hat < 1.01, bulk and tail ESS >= 400 over all KL coefficients and d)",
+    "not_met": "a run that does not meet the criteria at 500 000 draws per chain is reported as not met; it is not extended",
+    "changes": "no reruns, extensions or setting changes after seeing the results without the user's approval"
+  }
+}

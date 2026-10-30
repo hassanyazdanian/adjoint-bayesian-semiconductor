@@ -1,0 +1,122 @@
+{
+  "id": "production_v1",
+  "status": "final",
+  "created": "2026-10-21",
+  "purpose": "Production runs for the revised manuscript (Reviewer 1, comment 1): NUTS-pCN comparison with cost-normalised efficiency and multi-chain diagnostics, and the joint reconstruction. Frozen before any production run; a change of any setting requires a new manifest id and new output tags.",
+  "output_tag": "_prod_v1",
+  "model": {
+    "inversion_mesh_n": 48,
+    "eps": 1.0,
+    "delta": 1.0,
+    "electrodes": "16 electrodes I_l = (3(l-1)/48, (3(l-1)+1)/48), l = 1..16, on y = 1",
+    "prior": {
+      "mean": "trend a(2y - 1)",
+      "mean_a": 2.0,
+      "tau": 16.0,
+      "alpha": 4.0,
+      "n_kl": 12,
+      "k": 14.0,
+      "eigenvalue_normalisation": "sum of the retained lambda_j = 1"
+    },
+    "plateaus_known": {
+      "cp": -2.0,
+      "cn": 1.0
+    },
+    "plateau_bounds_joint": {
+      "cp": [
+        -2.5,
+        -1.5
+      ],
+      "cn": [
+        0.5,
+        1.5
+      ]
+    },
+    "plateau_bounds_note": "joint-setting bounds of config.py, checked by the driver but not used by the v1 stages"
+  },
+  "data": {
+    "ex1": {
+      "path": "obs/obs_Ex1.pickle",
+      "sha256": "db49f165614f4aad8fcfc6ab27ae56762c548cfe83c88b7db0597cb2d791d8bc"
+    },
+    "data_mesh_n": 192,
+    "noise_level": 0.01,
+    "noise_definition": "sigma = rho ||y_true||_2 / sqrt(N_meas)",
+    "noise_seed": 123,
+    "truth_interface_width": 0.035,
+    "note": "existing observation files; their bytes are tracked in git and must not be regenerated"
+  },
+  "chains": {
+    "count": 4,
+    "seed": 0,
+    "seed_rule": "chain c uses seed + c",
+    "initialisation": "prior_draw"
+  },
+  "nuts": {
+    "mass_matrix": "dense",
+    "target_accept_prob": 0.99,
+    "max_tree_depth": 10,
+    "warmup_steps": 500,
+    "num_samples_cap": 2000,
+    "checkpoint_every": 250,
+    "target_rationale": "0.8 and 0.9 gave 18 and 10 divergences per 1200 draws; 0.95 with 500 warm-up steps gave 2-15 per 2000 draws (report Sections 6.5, 8.1)"
+  },
+  "pcn": {
+    "n_warmup": 5000,
+    "n_burn": 30000,
+    "n_samples_cap": 500000,
+    "checkpoint_every": 50000,
+    "tuning": "none during the production run (fixed beta)",
+    "beta": {
+      "ex1": 0.43131272512554686
+    },
+    "beta_rule": "8 x the mean tuned beta (0.05391409064069336) of 4 tuned chains (target acceptance 0.234), selected from the Example 1 step-size sweep (1/2, 2, 3, 4, 6, 8, 12 x) by the largest smallest bulk-or-tail ESS over all monitored quantities per PDE solve (rule chosen after the pilot)",
+    "beta_source": {
+      "ex1": "results/pcn_Setting1_Ex1_pilot_beta_x8 (report Section 6.4)"
+    }
+  },
+  "stages": {
+    "ex1_nuts": {
+      "example": 1,
+      "setting": 1,
+      "method": "nuts"
+    },
+    "ex1_pcn": {
+      "example": 1,
+      "setting": 1,
+      "method": "pcn"
+    }
+  },
+  "diagnostics": {
+    "monitored": "all KL coefficients and the junction depth at x = 0.5; c_p and c_n in the joint setting",
+    "r_hat_below": 1.01,
+    "ess_bulk_at_least": 400,
+    "ess_tail_at_least": 400,
+    "undefined": "an undefined R-hat or ESS of any monitored quantity means not passed",
+    "checkpoints": "retrospective, on prefixes of the capped runs; costs from per-draw records; first pass reported with persistence, or 'not reached within the cap'"
+  },
+  "divergences": {
+    "follow_up_rule": "more than 0.5 % of the retained draws, or at least 3 divergences with 75 % or more in one chain",
+    "handling": "report count, chain and location; keep the output; investigate the states; never change settings silently"
+  },
+  "timing": {
+    "batches": "one four-chain sampler batch at a time, no other heavy jobs on the machine",
+    "threads": {
+      "OMP_NUM_THREADS": 1,
+      "MKL_NUM_THREADS": 1,
+      "OPENBLAS_NUM_THREADS": 1,
+      "VECLIB_MAXIMUM_THREADS": 1,
+      "NUMEXPR_NUM_THREADS": 1,
+      "torch": 1
+    },
+    "reported": [
+      "aggregate worker time (sum over chains), sampling only and including warm-up",
+      "actual batch elapsed time from launch to the last chain end (epoch timestamps)",
+      "longest single chain"
+    ],
+    "excluded_from_sampler_timers": "model construction and KL set-up (included in the batch elapsed time)"
+  },
+  "failure_handling": "outputs are validated with check_run.py --production; an invalid output stops the driver and is kept for inspection; a valid run that fails the diagnostics or needs divergence follow-up is kept and flagged, never silently rerun with other settings",
+  "frozen": "2026-10-21",
+  "scope": "Example 1, known plateaus (Setting 1) only: stages ex1_nuts and ex1_pcn. Example 2 and the joint reconstruction are not part of this manifest; they will be specified in a later manifest version."
+}
