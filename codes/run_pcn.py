@@ -1,689 +1,109 @@
 # run_pcn.py
+"""
+pCN reference sampler (Section 6.3), one chain per call.
+Usage: python run_pcn.py --example 1 --setting 1 --chain 0          (tuned beta)
+       python run_pcn.py --example 1 --setting 1 --chain 0 --beta 0.01 --tag _beta0.01   (fixed beta)
+"""
+import argparse
+import time
 
-import os
-import pickle
 import numpy as np
-import dolfin as dl
 import torch
-from matern_torch import TorchMaternCov
-from pde_model import TopFluxPDE
-from fenics_torch_bridge import FenicsTopFluxMisfit
-from sampler import Gibbs, pCN
+
+import config as cfg
+from io_utils import load_data, run_identity, save_samples
+from posterior import build_problem, starting_point
+from samplers import pcn, gibbs_pcn
 
 
-# --------------------------------------------------
-# Global settings
-# --------------------------------------------------
-dl.set_log_level(50)
-torch.set_default_dtype(torch.float64)
+def run_pcn(data_path, setting, out_path, chain=0, k=None, n_kl=None, tau=None, mean_a=None, beta=None, n_warmup=5000,
+            n_samples=300000, n_burn=30000, beta0=0.1, target_acceptance=0.234, seed=0, init_file=None, manifest=None):
+    torch.set_num_threads(1)
+    t_launch = time.time()                          # epoch seconds, before the model is built
+    if n_samples < 1 or n_warmup < 0 or n_burn < 0:
+        raise ValueError("n_samples must be >= 1, n_warmup and n_burn >= 0")
+    data = load_data(data_path)
+    post = build_problem(data, setting, k, n_kl, tau, mean_a)
+    model = post.model
+    rng = np.random.default_rng(seed + chain)
+    theta0, init_policy = starting_point(post, rng, init_file, chain, seed + chain)
+    identity = run_identity(data, init_policy, manifest)          # captured at launch, before sampling
+    adapt = beta is None
+    print(f"pCN chain {chain}: setting {setting}, dim(theta) = {post.dim}, N_meas = {model.n_meas}, "
+          f"sigma = {post.sigma:.4e}, k = {post.prior.k}, " + ("tuned beta" if adapt else f"fixed beta = {beta}"))
 
+    cost, attempts_log = {}, []
+    def snapshot():
+        cost["warmup"] = dict(model.stats, wall_time=time.perf_counter() - t0)
 
-# --------------------------------------------------
-# Helper functions
-# --------------------------------------------------
-def bounded(raw, low, high):
-    """
-    Map unconstrained raw scalar to bounded interval [low, high].
-    """
-    return low + (high - low) * torch.sigmoid(raw)
+    def counted(loglike):
+        """loglike, recording the cumulative forward-solve attempts after every call."""
+        def wrapped(*args):
+            try:
+                return loglike(*args)
+            finally:
+                attempts_log.append(model.stats["forward_attempts"])
+        return wrapped
 
-
-def neg_log_uniform_pushforward(raw):
-    """
-    Negative log-density induced on the raw variable when the
-    bounded physical parameter has a uniform prior on its interval.
-
-    If
-
-        c = low + (high-low) sigmoid(raw),
-
-    then, up to an additive constant,
-
-        -log pi(raw) = softplus(raw) + softplus(-raw).
-    """
-    return torch.nn.functional.softplus(raw) + torch.nn.functional.softplus(-raw)
-
-
-def make_output_dir(out_dir):
-    os.makedirs(out_dir, exist_ok=True)
-
-
-
-def get_plateau_bounds(obs, CP=None, CN=None):
-    """
-    Return bounds for cp and cn.
-
-    CP: bounds for p-type / negative plateau.
-    CN: bounds for n-type / positive plateau.
-    """
-    cp_true = float(obs["C_p"])
-    cn_true = float(obs["C_n"])
-    
-    if CP is None:
-        CP = obs.get("cp_bounds", (cp_true - 0.5, cp_true + 0.5))
-
-    if CN is None:
-        CN = obs.get("cn_bounds", (cn_true - 0.5, cn_true + 0.5))
-
-    CP = tuple(map(float, CP))
-    CN = tuple(map(float, CN))
-
-    return CP, CN
-
-
-def build_pde_from_obs(obs):
-    """
-    Build TopFluxPDE from observation dictionary.
-    """
-    pde = TopFluxPDE(
-        N_points=int(obs["N_x"]),
-        Lx=float(obs["Lx"]),
-        lam=float(obs["lambda_val"]),
-        delta=float(obs["delta_val"]),
-        V_top=float(obs["V_top"]),
-        V_bottom=float(obs["V_bottom"]),
-    )
-
-    return pde
-
-
-def get_observation_subset(pde, y_obs_full, stride):
-    """
-    Set full or sparse top-flux observations in the PDE object.
-    """
-    y_obs_full = np.asarray(y_obs_full, dtype=float)
-    m = y_obs_full.size
-
-    if stride is None or int(stride) <= 1:
-        obs_idx = np.arange(m, dtype=int)
-        y_obs_sub = y_obs_full.copy()
-        pde.set_obs(y_obs_sub, obs_idx=None)
-        stride = 1
+    t0, t0_epoch = time.perf_counter(), time.time()
+    # tuning (n_warmup steps) and burn-in (n_burn steps) are both discarded warm-up; beta keeps being
+    # tuned through both, so that it is not frozen while the chain is still moving towards the posterior
+    kw = dict(n_warmup=n_warmup + n_burn, n_adapt=n_warmup + n_burn, beta0=beta0 if adapt else beta, adapt=adapt,
+              target=target_acceptance, rng=rng, on_warmup_end=snapshot)
+    if post.known_plateaus:
+        out = pcn(counted(lambda z: -post.neg_log_likelihood(z)), theta0, n_samples, **kw)
+        theta = out["z"]
+        info = dict(beta=out["beta"], acceptance=out["acceptance"], accepted_fraction=out["accepted_fraction"],
+                    beta_trace=out["beta_trace"])
+        calls_per_step = 1
     else:
-        stride = int(stride)
-        obs_idx = np.arange(0, m, stride, dtype=int)
-        y_obs_sub = y_obs_full[obs_idx]
-        pde.set_obs(y_obs_sub, obs_idx=obs_idx)
+        out = gibbs_pcn(counted(lambda z, r: -post.neg_log_likelihood(np.concatenate([z, r]))),
+                        post.neg_log_prior_plateaus, theta0[: post.n_kl], theta0[post.n_kl:],
+                        n_samples, **kw)
+        theta = np.hstack([out["z"], out["r"]])
+        info = dict(beta=out["beta"], mh_scale=out["mh_scale"], acceptance=out["acceptance"])
+        calls_per_step = 2
+    cost["total"] = dict(model.stats, wall_time=time.perf_counter() - t0)
+    timing = dict(launch_epoch=t_launch, warmup_start_epoch=t0_epoch,
+                  sampling_start_epoch=t0_epoch + cost["warmup"]["wall_time"], end_epoch=time.time())
+    # attempts per retained draw: the cumulative count after the last likelihood call of each step
+    # (one initial call, then calls_per_step per step; the last n_samples steps are retained)
+    cum = np.asarray(attempts_log, dtype=float)[::calls_per_step]       # after the initial call and after each step
+    per_step = np.diff(cum)
+    info.update(forward_attempts_per_draw=per_step[-n_samples:], acceptance_kind="mean acceptance probability",
+                timing=timing)
+    print(f"pCN finished in {cost['total']['wall_time'] / 3600:.2f} h; beta = {info['beta']:.4g}, "
+          f"acceptance = {info['acceptance']}")
+
+    save_samples(out_path, post, theta, "pcn", times=out["times"], cost=cost, identity=identity, setting=setting,
+                 data=data_path, chain=chain, seed=seed + chain, adapted=adapt, n_warmup=n_warmup,
+                 n_burn=n_burn, target_acceptance=target_acceptance,
+                 tuning="Robbins-Monro, gain t^-0.6" if adapt else "none (fixed beta, selected by a step-size sweep)",
+                 init_file=init_file, theta0=np.asarray(theta0), **info)
 
-    return obs_idx, y_obs_sub, stride
 
-
-def build_prior_from_obs(
-    obs,
-    pde,
-    corr_len=0.15,
-    nu=3.0,
-):
-    """
-    Build TorchMaternCov on the same mesh as the PDE.
-    """
-    prior = TorchMaternCov(
-        pde.mesh,
-        push_forward_method="sigmoid",
-        C_p = float(obs["C_p"]),
-        C_n = float(obs["C_n"]),
-        k=float(obs["k"]),
-        device="cpu",
-    )
-
-    prior.compute_eigen_decomp(
-        int(obs["N_KL"]),
-        corr_len=corr_len,
-        nu=nu,
-    )
-
-    return prior
-
-
-# --------------------------------------------------
-# Log posterior for pCN/Gibbs sampler
-# --------------------------------------------------
-class LogPostTopFlux:
-    """
-    Log-posterior up to an additive constant for the mixed Gibbs sampler.
-
-    - The KL coefficients p are updated by pCN.
-      Therefore the N(0,I) prior on p is NOT included here.
-      pCN preserves the Gaussian prior by construction.
-
-    - If infer_plateaus=True, the plateau variables are updated by
-      random-walk MH. Therefore their prior contribution MUST be included.
-
-    - If infer_plateaus=False, cp and cn are fixed and only p is sampled.
-    """
-
-    def __init__(
-        self,
-        pde,
-        prior,
-        sigma2,
-        infer_plateaus=True,
-        CP=None,
-        CN=None,
-        cp_fixed=None,
-        cn_fixed=None,
-        add_raw_gaussian_prior=False,
-        raw_sd=2.0,
-    ):
-        self.pde = pde
-        self.prior = prior
-        self.sigma2 = float(sigma2)
-
-        self.infer_plateaus = bool(infer_plateaus)
-
-        self.add_raw_gaussian_prior = bool(add_raw_gaussian_prior)
-        self.raw_sd = float(raw_sd)
-
-        if self.infer_plateaus:
-            if CP is None or CN is None:
-                raise ValueError("CP and CN must be provided when infer_plateaus=True.")
-
-            self.CP = tuple(map(float, CP))
-            self.CN = tuple(map(float, CN))
-
-            self.cp_fixed = None
-            self.cn_fixed = None
-
-        else:
-            if cp_fixed is None or cn_fixed is None:
-                raise ValueError(
-                    "cp_fixed and cn_fixed must be provided when infer_plateaus=False."
-                )
-
-            self.CP = None
-            self.CN = None
-
-            self.cp_fixed = float(cp_fixed)
-            self.cn_fixed = float(cn_fixed)
-
-    def __call__(self, p_np, h_np=None):
-        """
-        Parameters
-        ----------
-        p_np : ndarray, shape (N_KL,)
-            KL coefficients.
-
-        h_np : ndarray, shape (2,), optional
-            Raw plateau variables [cp_raw, cn_raw].
-            Used only when infer_plateaus=True.
-
-        Returns
-        -------
-        float
-            Log-posterior up to a constant, excluding the Gaussian prior on p.
-        """
-        p_t = torch.tensor(p_np, dtype=torch.float64)
-
-        # --------------------------------------------------
-        # Plateau values
-        # --------------------------------------------------
-        if self.infer_plateaus:
-            if h_np is None:
-                raise ValueError("h_np must be provided when infer_plateaus=True.")
-
-            cp_raw = torch.tensor(h_np[0], dtype=torch.float64)
-            cn_raw = torch.tensor(h_np[1], dtype=torch.float64)
-
-            cp = bounded(cp_raw, self.CP[0], self.CP[1])
-            cn = bounded(cn_raw, self.CN[0], self.CN[1])
-
-            # Uniform prior on physical cp, cn induces this prior on raw variables.
-            log_prior_plateaus = -float(
-                neg_log_uniform_pushforward(cp_raw)
-                + neg_log_uniform_pushforward(cn_raw)
-            )
-
-            if self.add_raw_gaussian_prior:
-                s2 = self.raw_sd * self.raw_sd
-                log_prior_plateaus += -0.5 * float(cp_raw**2 + cn_raw**2) / s2
-
-        else:
-            cp = torch.tensor(self.cp_fixed, dtype=torch.float64)
-            cn = torch.tensor(self.cn_fixed, dtype=torch.float64)
-
-            log_prior_plateaus = 0.0
-
-        # --------------------------------------------------
-        # Assemble field
-        # --------------------------------------------------      
-        self.prior.C_p = cp
-        self.prior.C_n = cn
-
-        C = self.prior.assemble_torch(p_t)
-
-        # --------------------------------------------------
-        # Data misfit
-        # --------------------------------------------------
-        J_data = FenicsTopFluxMisfit.apply(
-            self.pde,
-            C,
-            self.sigma2,
-            cp,
-            cn,
-        )
-
-        log_like = -float(J_data)
-
-        return log_like + log_prior_plateaus
-
-
-# --------------------------------------------------
-# Derived physical plateau samples
-# --------------------------------------------------
-def get_derived_plateau_samples(
-    samples,
-    infer_plateaus=True,
-    CP=None,
-    CN=None,
-    cp_fixed=None,
-    cn_fixed=None,
-):
-    """
-    Return physical cp and cn samples.
-    """
-    S = samples["p"].shape[0]
-
-    if infer_plateaus:
-        cp_raw = torch.tensor(samples["cp_raw"], dtype=torch.float64)
-        cn_raw = torch.tensor(samples["cn_raw"], dtype=torch.float64)
-
-        cp_s = bounded(cp_raw, CP[0], CP[1]).detach().cpu().numpy()
-        cn_s = bounded(cn_raw, CN[0], CN[1]).detach().cpu().numpy()
-
-    else:
-        cp_s = np.full(S, float(cp_fixed))
-        cn_s = np.full(S, float(cn_fixed))
-
-    return cp_s, cn_s
-
-
-def save_pcn_results(
-    out_dir,
-    out_name,
-    samples,
-    derived,
-    config,
-):
-    """
-    Save pCN/Gibbs samples and metadata.
-    """
-    make_output_dir(out_dir)
-
-    out_path = os.path.join(out_dir, out_name)
-
-    with open(out_path, "wb") as f:
-        pickle.dump(
-            {
-                "samples": samples,
-                "derived": derived,
-                "config": config,
-            },
-            f,
-            protocol=pickle.HIGHEST_PROTOCOL,
-        )
-
-    print("\nSaved:", out_path)
-
-    return out_path
-
-
-# --------------------------------------------------
-# Main pCN/Gibbs routine
-# --------------------------------------------------
-def run_pcn(
-    data_file="./obs/obs_synth_top.pickle",
-    out_dir="./stat",
-    out_name=None,
-    infer_plateaus=True,
-    warmup=5000,
-    skip_len=100,
-    nsamples=20000,
-    burn=10000,
-    corr_len=0.15,
-    nu=3.0,
-    stride=1,
-    seed=0,
-    CP=None,
-    CN=None,
-    cp_fixed=None,
-    cn_fixed=None,
-    pcn_scale_init=0.05,
-    mh_scale_init=0.2,
-    add_raw_gaussian_prior=False,
-    raw_sd=2.0,
-):
-    """
-    Run mixed pCN/Gibbs sampler.
-
-    Setting 1:
-        infer_plateaus=False
-        sample only p with fixed cp, cn.
-
-    Setting 2:
-        infer_plateaus=True
-        sample p by pCN and h=(cp_raw, cn_raw) by random-walk MH.
-
-    Parameters
-    ----------
-    beta : float
-        pCN scale for KL coefficients.
-
-    mh_scale : float
-        Random-walk MH scale for raw plateau variables.
-        Used only when infer_plateaus=True.
-    """
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    make_output_dir(out_dir)
-
-    # --------------------------------------------------
-    # Load observation file
-    # --------------------------------------------------
-    with open(data_file, "rb") as f:
-        obs = pickle.load(f)
-
-    N_KL = int(obs["N_KL"])
-    y_obs_full = np.asarray(obs["y_obs"], dtype=float)
-
-    sigma = float(obs["sigma"])
-    sigma2 = sigma * sigma
-
-    
-    print("\nNoise:")
-    print("  sigma  =", sigma)
-    print("  sigma2 =", sigma2)
-
-    # --------------------------------------------------
-    # PDE and observations
-    # --------------------------------------------------
-    pde = build_pde_from_obs(obs)
-
-    obs_idx, y_obs_sub, stride = get_observation_subset(
-        pde=pde,
-        y_obs_full=y_obs_full,
-        stride=stride,
-    )
-
-    print("\nObservation setup:")
-    print("  full data size =", y_obs_full.size)
-    print("  used data size =", y_obs_sub.size)
-    print("  stride =", stride)
-
-    # --------------------------------------------------
-    # Prior
-    # --------------------------------------------------
-    prior = build_prior_from_obs(
-        obs=obs,
-        pde=pde,
-        corr_len=corr_len,
-        nu=nu,
-    )
-
-    # --------------------------------------------------
-    # Plateau setup
-    # --------------------------------------------------
-    CP, CN = get_plateau_bounds(obs, CP=CP, CN=CN)
-
-    if cp_fixed is None:
-        cp_fixed = float(obs["C_p"])
-
-    if cn_fixed is None:
-        cn_fixed = float(obs["C_n"])
-
-    if infer_plateaus:
-        print("\npCN mode: unknown cp and cn")
-        print("  cp bounds =", CP)
-        print("  cn bounds =", CN)
-    else:
-        print("\npCN mode: known cp and cn")
-        print("  fixed cp =", cp_fixed)
-        print("  fixed cn =", cn_fixed)
-
-    # --------------------------------------------------
-    # Log-posterior
-    # --------------------------------------------------
-    logpost = LogPostTopFlux(
-        pde=pde,
-        prior=prior,
-        sigma2=sigma2,
-        infer_plateaus=infer_plateaus,
-        CP=CP,
-        CN=CN,
-        cp_fixed=cp_fixed,
-        cn_fixed=cn_fixed,
-        add_raw_gaussian_prior=add_raw_gaussian_prior,
-        raw_sd=raw_sd,
-    )
-
-    # --------------------------------------------------
-    # Initial state
-    # --------------------------------------------------
-    p0 = np.zeros(N_KL)
-    
-    print("\nInitial sampler state:")
-    print("  p0 shape =", p0.shape)
-    print("  initial pCN scale =", pcn_scale_init)
-    
-    if infer_plateaus:
-        h0 = np.array([0.0, 0.0], dtype=float)  # [cp_raw, cn_raw]
-    
-        print("  h0 =", h0)
-        print("  initial MH scale =", mh_scale_init)
-        print("  initial cp =", float(bounded(torch.tensor(h0[0]), CP[0], CP[1])))
-        print("  initial cn =", float(bounded(torch.tensor(h0[1]), CN[0], CN[1])))
-
-   # --------------------------------------------------
-    # Run sampler
-    # --------------------------------------------------
-    if infer_plateaus:
-        # --------------------------------------------------
-        # Setting 2:
-        # Gibbs sampler:
-        #   p-block       : pCN
-        #   plateau block : random-walk MH for h = [cp_raw, cn_raw]
-        # --------------------------------------------------
-        gibbs = Gibbs(
-            inits=[p0, h0],
-            target=logpost,
-            scales=[pcn_scale_init, mh_scale_init],
-        )
-    
-        gibbs.warm_up(
-            N_outer=warmup // skip_len,
-            N_inner=skip_len,
-        )
-    
-        pcn_scale_adapted = gibbs.samplers[0].scale
-        mh_scale_adapted = gibbs.samplers[1].scale
-    
-        print("Adapted pCN scale =", pcn_scale_adapted)
-        print("Adapted MH scale  =", mh_scale_adapted)
-    
-        gibbs.sample(
-            N_outer=nsamples,
-            N_inner=1,
-        )
-    
-        p_samps, h_samps = gibbs.get_samples()
-    
-        p_samps = p_samps[burn:]
-        h_samps = h_samps[burn:]
-    
-        samples = {
-            "p": p_samps,
-            "cp_raw": h_samps[:, 0],
-            "cn_raw": h_samps[:, 1],
-        }
-
-    else:
-        # --------------------------------------------------
-        # Setting 1:
-        # Pure pCN sampler for p only.
-        # cp and cn are fixed.
-        # --------------------------------------------------
-        target_p = lambda p: logpost(p, None)
-    
-        pcn_sampler = pCN(x0=p0, target=target_p, scale = pcn_scale_init)
-    
-        # Warm-up and then remove warm-up samples.
-        pcn_sampler.warm_up(N=warmup, skip_len=skip_len)
-        
-        pcn_scale_adapted = pcn_sampler.scale
-        mh_scale_adapted = None
-        
-        print("Adapted pCN scale =", pcn_scale_adapted)
-        
-        # reset storage after adaptation/warmup
-        pcn_sampler.samples = [pcn_sampler.current_sample.copy()]
-        pcn_sampler.acc = []
-        
-    
-        # Draw posterior samples.
-        pcn_sampler.sample(N=nsamples)
-    
-        p_samps = pcn_sampler.get_samples()
-        p_samps = p_samps[burn:]
-    
-        samples = {
-            "p": p_samps,
-        }
-        
-        
-        
-    print("\nSampling finished:")
-    print("  retained p samples =", samples["p"].shape)
-
-    if infer_plateaus:
-        print("  retained cp_raw samples =", samples["cp_raw"].shape)
-        print("  retained cn_raw samples =", samples["cn_raw"].shape)
-
-    # --------------------------------------------------
-    # Derived physical plateau samples
-    # --------------------------------------------------
-    cp_s, cn_s = get_derived_plateau_samples(
-        samples=samples,
-        infer_plateaus=infer_plateaus,
-        CP=CP,
-        CN=CN,
-        cp_fixed=cp_fixed,
-        cn_fixed=cn_fixed,
-    )
-
-    derived = {
-        "cp": cp_s,
-        "cn": cn_s,
-    }
-
-    # --------------------------------------------------
-    # Output name
-    # --------------------------------------------------
-    if out_name is None:
-        if infer_plateaus:
-            out_name = "pcn_unknown_cp_cn.pickle"
-        else:
-            out_name = "pcn_known_cp_cn.pickle"
-
-    # --------------------------------------------------
-    # Save
-    # --------------------------------------------------
-    config = {
-        "data_file": data_file,
-        "infer_plateaus": infer_plateaus,
-        "corr_len": corr_len,
-        "nu": nu,
-        "stride": stride,
-        "sigma": sigma,
-        "sigma2": sigma2,
-        "N_KL": N_KL,
-        "k_sigmoid": float(obs["k"]),
-        "seed": seed,
-        "warmup": warmup,
-        "skip_len": skip_len,
-        "nsamples": nsamples,
-        "burn": burn,
-    
-        # pCN adaptation
-        "pcn_scale_init": pcn_scale_init,
-        "pcn_scale_adapted": pcn_scale_adapted,
-    
-        # MH adaptation for plateau block
-        "mh_scale_init": mh_scale_init if infer_plateaus else None,
-        "mh_scale_adapted": mh_scale_adapted if infer_plateaus else None,
-    
-        # plateau setup
-        "CP": CP,
-        "CN": CN,
-        "cp_fixed": cp_fixed,
-        "cn_fixed": cn_fixed,
-    
-        # optional extra prior on raw plateau variables
-        "add_raw_gaussian_prior": add_raw_gaussian_prior,
-        "raw_sd": raw_sd if add_raw_gaussian_prior else None,
-    }
-
-    save_pcn_results(
-        out_dir=out_dir,
-        out_name=out_name,
-        samples=samples,
-        derived=derived,
-        config=config,
-    )
-
-    return samples, derived, config
-
-
-# --------------------------------------------------
-# Run
-# --------------------------------------------------
 if __name__ == "__main__":
-
-    Example = 2
-    Setting = 1
-
-    # --------------------------------------------------
-    # Setting 1: known cp and cn
-    # Setting 2: unknown cp and cn
-    # --------------------------------------------------
-    if Setting == 1:
-        infer_plateaus = False
-
-        cp_fixed = -2.0
-        cn_fixed = 1.0
-
-        CP = None
-        CN = None
-
-    elif Setting == 2:
-        infer_plateaus = True
-
-        cp_fixed = None
-        cn_fixed = None
-
-        CP = (-2.5, -1.5)
-        CN = (0.5, 1.5)
-
-    else:
-        raise ValueError("Setting value must be 1 or 2.")
-
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--example", type=int, default=1)
+    ap.add_argument("--setting", type=int, default=1, help="1: known plateaus, 2: joint (Gibbs)")
+    ap.add_argument("--chain", type=int, default=0, help="chain index; the seed is seed + chain")
+    ap.add_argument("--data", default=None, help="data file (default: obs/obs_Ex<example>.pickle)")
+    ap.add_argument("--tag", default="", help="suffix of the run folder, e.g. _k10 or _beta0.01")
+    ap.add_argument("--k", type=float, default=None, help="sigmoid sharpness (default config.K_SIGMOID)")
+    ap.add_argument("--n_kl", type=int, default=None, help="KL truncation (default config.N_KL)")
+    ap.add_argument("--manifest", default=None, help="experiment manifest (JSON); its identity is stored with the chain")
+    ap.add_argument("--init_file", default=None, help=".npy file with one starting point per chain (default: prior draw)")
+    ap.add_argument("--tau", type=float, default=None, help="Matern tau (default config.TAU)")
+    ap.add_argument("--mean_a", type=float, default=None, help="trend-mean slope a (default config.PRIOR_MEAN_A; 0: zero mean)")
+    ap.add_argument("--beta", type=float, default=None, help="fixed pCN step size (no tuning)")
+    for key, val in cfg.PCN.items():
+        ap.add_argument(f"--{key}", type=type(val), default=val)
+    a = ap.parse_args()
     run_pcn(
-        data_file=f"./obs/obs_synth_top_Ex{Example}.pickle",
-        out_dir=f"./stat_Setting{Setting}",
-        out_name=f"pcn_Setting{Setting}_Ex{Example}.pickle",
-        infer_plateaus=infer_plateaus,
-        warmup=5000,
-        skip_len=100,
-        nsamples=300000,
-        burn=30000,
-        corr_len=0.15,
-        nu=3.0,
-        stride=3,
-        seed=0,
-        CP=CP,
-        CN=CN,
-        cp_fixed=cp_fixed,
-        cn_fixed=cn_fixed,
-        pcn_scale_init=1,
-        mh_scale_init=0.2,
-        add_raw_gaussian_prior=False,
+        data_path=a.data or cfg.data_file(a.example),
+        setting=a.setting,
+        out_path=cfg.chain_file("pcn", a.setting, a.example, a.chain, a.tag),
+        chain=a.chain, k=a.k, n_kl=a.n_kl, tau=a.tau, mean_a=a.mean_a, beta=a.beta,
+        n_warmup=a.n_warmup, n_samples=a.n_samples, n_burn=a.n_burn, beta0=a.beta0,
+        target_acceptance=a.target_acceptance, seed=a.seed, init_file=a.init_file, manifest=a.manifest,
     )

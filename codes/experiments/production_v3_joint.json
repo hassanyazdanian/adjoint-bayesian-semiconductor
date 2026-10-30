@@ -1,0 +1,152 @@
+{
+  "id": "production_v3_joint",
+  "status": "final",
+  "created": "2026-10-28",
+  "purpose": "Joint reconstruction for the paper (Section 6.4): Example 1 (straight junction), Setting 2, KL coefficients and plateau values c_p, c_n inferred together, with uniform plateau priors. Stage A uses the paper's intervals, Stage B intervals twice as wide with the same centres (Reviewer 1 item 5: dependence of the plateau posterior on the prior support; Reviewer 2: posterior/prior sd of the plateaus; Reviewer 1 item 1: chains, R-hat, bulk and tail ESS, divergences, cost). NUTS only. Supersedes production_joint_v1 (committed 28 Oct 2026, never run). Declared and frozen before the runs; a change of any setting requires a new manifest id and output tag.",
+  "output_tag": "_prod_v3_joint",
+  "model": {
+    "inversion_mesh_n": 48,
+    "eps": 1.0,
+    "delta": 1.0,
+    "electrodes": "16 electrodes I_l = (3(l-1)/48, (3(l-1)+1)/48), l = 1..16, on y = 1",
+    "prior": {
+      "mean": "trend a(2y - 1)",
+      "mean_a": 2.0,
+      "tau": 16.0,
+      "alpha": 4.0,
+      "n_kl": 12,
+      "k": 14.0,
+      "eigenvalue_normalisation": "sum of the retained lambda_j = 1",
+      "plateau_prior": "c_p ~ U(a_p, b_p), c_n ~ U(a_n, b_n), independent of z and of each other",
+      "sampled_coordinates": "theta = (z, r_p, r_n), c = a + (b - a) S(r) with the logistic S, and the log-Jacobian term -log S'(r_p) - log S'(r_n) in the potential (posterior.py, Posterior.potential with jacobian=True)"
+    },
+    "plateaus_known": {
+      "cp": -2.0,
+      "cn": 1.0
+    },
+    "plateau_bounds_joint": {
+      "cp": [
+        -2.5,
+        -1.5
+      ],
+      "cn": [
+        0.5,
+        1.5
+      ]
+    },
+    "plateau_bounds_note": "the paper's intervals (config.py CP_BOUNDS, CN_BOUNDS), used by Stage A; Stage B overrides them (twice as wide, same centres)",
+    "true_values": {
+      "cp": -2.0,
+      "cn": 1.0,
+      "depth_x05": 0.562,
+      "depth_note": "lowest crossing of c = 0 on x = 0.5 of the true field on the inversion mesh"
+    }
+  },
+  "data": {
+    "ex1": {
+      "path": "obs/obs_Ex1.pickle",
+      "sha256": "db49f165614f4aad8fcfc6ab27ae56762c548cfe83c88b7db0597cb2d791d8bc"
+    },
+    "data_mesh_n": 192,
+    "noise_level": 0.01,
+    "noise_definition": "sigma = rho ||y_true||_2 / sqrt(N_meas)",
+    "noise_seed": 123,
+    "truth_interface_width": 0.035,
+    "note": "existing observation files; their bytes are tracked in git and must not be regenerated"
+  },
+  "chains": {
+    "count": 4,
+    "seed": 100,
+    "seed_rule": "chain c of a stage uses the stage seed + c: Stage A 100-103, Stage B 200-203",
+    "initialisation": "prior_draw",
+    "initialisation_note": "each chain starts from an independent prior draw: z ~ N(0, I), r_p, r_n ~ Logistic(0, 1), i.e. c_p and c_n uniform on the stage's intervals"
+  },
+  "nuts": {
+    "mass_matrix": "dense",
+    "target_accept_prob": 0.99,
+    "max_tree_depth": 10,
+    "warmup_steps": 500,
+    "num_samples_cap": 2000,
+    "checkpoint_every": 250,
+    "target_rationale": "User decision, 28 Oct 2026, replacing the rule of production_v1_t095 ('the primary target is used for Example 2 and the joint reconstruction', i.e. 0.95). Reason: there is no pCN comparison in the joint setting, and in Example 2 target 0.99 removed the divergences (0 against 12 at 0.95) and was more efficient than 0.95 (2.6x per PDE solve for the retained draws, 2.2x including warm-up; report Section 13). For the record: in Example 1, Setting 1 the order was reversed (0.95 more efficient; 26 divergences at 0.95, 21 at 0.99; report Section 12)."
+  },
+  "pcn": {
+    "note": "not used: no pCN run in the joint setting"
+  },
+  "stages": {
+    "joint_A": {
+      "example": 1,
+      "setting": 2,
+      "method": "nuts",
+      "seed": 100,
+      "plateau_bounds": {
+        "cp": [
+          -2.5,
+          -1.5
+        ],
+        "cn": [
+          0.5,
+          1.5
+        ]
+      },
+      "tag": "_A"
+    },
+    "joint_B": {
+      "example": 1,
+      "setting": 2,
+      "method": "nuts",
+      "seed": 200,
+      "plateau_bounds": {
+        "cp": [
+          -3.0,
+          -1.0
+        ],
+        "cn": [
+          0.0,
+          2.0
+        ]
+      },
+      "tag": "_B"
+    }
+  },
+  "diagnostics": {
+    "monitored": "all KL coefficients, c_p, c_n and the junction depth d (lowest crossing of c = 0 on x = 0.5)",
+    "r_hat_below": 1.01,
+    "ess_bulk_at_least": 400,
+    "ess_tail_at_least": 400,
+    "undefined": "an undefined R-hat or ESS of any monitored quantity means not passed",
+    "checkpoints": "retrospective, on prefixes of the capped runs; costs from per-draw records; first pass reported with persistence, or 'not reached within the cap'"
+  },
+  "divergences": {
+    "follow_up_rule": "more than 0.5 % of the retained draws, or at least 3 divergences with 75 % or more in one chain",
+    "handling": "report count, chain and location; keep the output; investigate the states; never change settings silently"
+  },
+  "timing": {
+    "batches": "one four-chain sampler batch at a time, no other heavy jobs on the machine",
+    "threads": {
+      "OMP_NUM_THREADS": 1,
+      "MKL_NUM_THREADS": 1,
+      "OPENBLAS_NUM_THREADS": 1,
+      "VECLIB_MAXIMUM_THREADS": 1,
+      "NUMEXPR_NUM_THREADS": 1,
+      "torch": 1
+    },
+    "reported": [
+      "aggregate worker time (sum over chains), sampling only and including warm-up",
+      "actual batch elapsed time from launch to the last chain end (epoch timestamps)",
+      "longest single chain"
+    ],
+    "excluded_from_sampler_timers": "model construction and KL set-up (included in the batch elapsed time)"
+  },
+  "failure_handling": "outputs are validated with check_run.py --production; an invalid output stops the driver and is kept for inspection; a valid run that fails the diagnostics or needs divergence follow-up is kept and flagged, never silently rerun with other settings",
+  "frozen": "2026-10-28",
+  "scope": "Example 1, unknown plateaus (Setting 2): stages joint_A (c_p ~ U(-2.5, -1.5), c_n ~ U(0.5, 1.5)) and joint_B (c_p ~ U(-3, -1), c_n ~ U(0, 2)), NUTS at target acceptance 0.99, run one after another.",
+  "predeclared": {
+    "reporting": "for each stage: diagnostics over all monitored quantities; divergences per chain with location; step sizes, tree depth, acceptance statistic; cost (gradients, PDE and forward-equivalent solves, retained and total, wall-clock time, minimum ESS per 10^3 forward-equivalent solves and per wall-clock second); RE and SSIM of the posterior mean; posterior of c_p, c_n, d (mean, sd, 5/50/95 % quantiles with MCSE, coverage of the truth by the 90 % interval); posterior/prior sd and mass near the bounds of c_p, c_n; for Stage B the mass outside the paper's intervals; corr(c_p, d), corr(c_n, d), corr(c_p, c_n); changes from A to B in combined MCSE",
+    "rules": "the convergence thresholds and the divergence follow-up rule of production_v1 apply unchanged",
+    "not_met": "a stage that does not meet the criteria at 2000 draws per chain is reported as not met; it is not extended",
+    "divergences": "divergences are reported with count, chain and location; there is no automatic rerun",
+    "widening": "if Stage B also accumulates at its bounds, that is reported as the result; there are no further widenings",
+    "changes": "no reruns, extensions or setting changes after seeing the results without the user's approval"
+  }
+}
