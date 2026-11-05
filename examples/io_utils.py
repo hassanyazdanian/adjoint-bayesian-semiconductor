@@ -1,5 +1,5 @@
 # io_utils.py
-"""Reading and writing data sets and MCMC samples (current and original formats)."""
+"""Reading and writing data sets and MCMC samples."""
 import datetime
 import glob
 import hashlib
@@ -13,9 +13,19 @@ import numpy as np
 
 
 def save_pickle(path, obj):
+    """Write obj to path atomically: to a temporary file, renamed to path only once it is complete, so that an
+    interrupted write never leaves a truncated file under the final name."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp = f"{path}.tmp{os.getpid()}"
+    try:
+        with open(tmp, "wb") as f:
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     print("Saved:", path)
 
 
@@ -25,38 +35,17 @@ def _numpy(x):
 
 def load_data(path):
     """
-    Synthetic data set as written by generate_synthetic_data.py. Files of the
-    original code (facet-averaged u_y on all top facets) are converted to the
-    electrode integrals (2.3) at every 3rd facet: y_l = h * u_y|_l, sigma -> h sigma.
-    The file is read once; data["_source"] holds its path and the SHA-256 of exactly the bytes
-    that were loaded, so results can be bound to the data actually used.
+    Synthetic data set as written by generate_synthetic_data.py. The file is read once; data["_source"] holds
+    its path and the SHA-256 of exactly the bytes that were loaded, so results can be bound to the data actually
+    used.
     """
     with open(path, "rb") as f:
         raw = f.read()
     data = pickle.loads(raw)
-    source = {"path": os.path.abspath(path), "sha256": hashlib.sha256(raw).hexdigest()}
-    if "C_true" not in data:
-        data["_source"] = source
-        return data
-
-    n, stride = int(data["N_x"]), 3
-    h = 1.0 / n
-    return {
-        "example": int(data.get("meta", {}).get("example", 0)),
-        "mesh_n": n,
-        "data_mesh_n": n,
-        "eps": float(data["lambda_val"]) ** 2,
-        "delta": float(data["delta_val"]),
-        "electrodes": tuple((stride * l * h, (stride * l + 1) * h) for l in range(n // stride)),
-        "cp_true": float(data["C_p"]),
-        "cn_true": float(data["C_n"]),
-        "c_true": np.asarray(data["C_true"], dtype=float),
-        "y_true": h * np.asarray(data["y_true"], dtype=float)[::stride],
-        "y_obs": h * np.asarray(data["y_obs"], dtype=float)[::stride],
-        "sigma": h * float(data["sigma"]),
-        "legacy": True,
-        "_source": source,
-    }
+    if not isinstance(data, dict) or "c_true" not in data or "y_obs" not in data:
+        raise ValueError(f"{path} is not a data set written by generate_synthetic_data.py")
+    data["_source"] = {"path": os.path.abspath(path), "sha256": hashlib.sha256(raw).hexdigest()}
+    return data
 
 
 def file_sha256(path):
@@ -94,11 +83,11 @@ THREAD_VARIABLES = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"
                     "NUMEXPR_NUM_THREADS")
 
 
-def run_identity(data, init_policy, manifest=None):
+def run_identity(data, init_policy):
     """
     Identity of a run, captured at launch (before sampling): the data actually loaded (path and
-    SHA-256 of its bytes), the code version, the experiment manifest (path, SHA-256 and its
-    "id" field), the initialisation policy, the launch time and host, and the thread settings.
+    SHA-256 of its bytes), the code version, the initialisation policy, the launch time and host,
+    and the thread settings.
     """
     out = {"data_path": data["_source"]["path"], "data_sha256": data["_source"]["sha256"],
            "data_hashed_at": "load", "code": code_version(), "init_policy": init_policy,
@@ -109,21 +98,14 @@ def run_identity(data, init_policy, manifest=None):
         out["threads"]["torch"] = torch.get_num_threads()
     except ImportError:
         pass
-    if manifest is not None:
-        import json
-        with open(manifest, "rb") as f:
-            raw = f.read()
-        out["manifest"] = {"path": os.path.abspath(manifest), "sha256": hashlib.sha256(raw).hexdigest(),
-                           "id": json.loads(raw).get("id")}
     return out
 
 
-def provenance(data_path=None, identity=None):
+def provenance(identity):
     """
-    Package versions and the identity of the run, stored with every chain. With the identity of
-    run_identity() (captured at launch), data_sha256 is the hash of the bytes actually loaded, and
-    data_sha256_at_save records the file on disk when the chain is saved (a difference means the
-    file was changed during the run). Without it (older callers) the file is hashed at save time.
+    Package versions and the identity of the run (run_identity(), captured at launch), stored with every
+    result: data_sha256 is the hash of the bytes actually loaded, and data_sha256_at_save records the file
+    on disk when the result is saved (a difference means the file was changed during the run).
     """
     out = {"python": platform.python_version()}
     for pkg in ("fenics-dolfin", "dolfin-adjoint", "torch", "pyro-ppl", "numpy", "scipy", "arviz"):
@@ -131,16 +113,12 @@ def provenance(data_path=None, identity=None):
             out[pkg] = importlib.metadata.version(pkg)
         except importlib.metadata.PackageNotFoundError:
             out[pkg] = None
-    if identity is not None:
-        out.update(identity)
-        out["data_sha256_at_save"] = file_sha256(identity["data_path"]) if os.path.isfile(identity["data_path"]) else None
-    elif data_path is not None:
-        out["data_sha256"] = file_sha256(data_path)
-        out["data_hashed_at"] = "save"
+    out.update(identity)
+    out["data_sha256_at_save"] = file_sha256(identity["data_path"]) if os.path.isfile(identity["data_path"]) else None
     return out
 
 
-def save_samples(path, post, theta, method, times=None, cost=None, identity=None, **info):
+def save_samples(path, post, theta, method, identity, times=None, cost=None, **info):
     """
     Store one chain theta (n_samples, dim) with everything postprocess.py needs.
     times: wall-clock seconds since the start of sampling (after warm-up) for each draw.
@@ -164,7 +142,7 @@ def save_samples(path, post, theta, method, times=None, cost=None, identity=None
         "prior": prior_settings(post.prior),
         "plateau_bounds": plateau_bounds(post),
         "info": info,
-        "provenance": provenance(info.get("data"), identity),
+        "provenance": provenance(identity),
     })
 
 
@@ -179,55 +157,27 @@ def plateau_bounds(post):
 
 
 def load_samples(path):
-    """Chain in the format of save_samples(); pickles of the original run_nuts/run_pcn are converted."""
+    """One chain, as written by save_samples()."""
     with open(path, "rb") as f:
         out = pickle.load(f)
-    if "samples" not in out:
-        return out
-
-    s, d, c = out["samples"], out.get("derived", {}), out.get("config", {})
-    z = _numpy(s["p"]).reshape(-1, _numpy(s["p"]).shape[-1])
-    has_r = "cp_raw" in s
-    return {
-        "method": "nuts" if "num_samples" in c else "pcn",
-        "z": z,
-        "r": np.column_stack([_numpy(s["cp_raw"]).ravel(), _numpy(s["cn_raw"]).ravel()]) if has_r else None,
-        "cp": _numpy(d["cp"]).ravel() if "cp" in d else np.full(len(z), float(c["cp_fixed"])),
-        "cn": _numpy(d["cn"]).ravel() if "cn" in d else np.full(len(z), float(c["cn_fixed"])),
-        "times": None,
-        "cost": None,
-        "kl_basis": None,
-        "latent_mean": None,
-        # z are coefficients in the original (non-orthonormal) KL basis, with a zero mean
-        "prior": dict(n_kl=int(c["N_KL"]), tau=float(c.get("corr_len", 0.15)) ** -2,
-                      alpha=float(c.get("nu", 3.0)) + 1.0, k=float(c["k_sigmoid"]), legacy_basis=True),
-        "info": {"legacy": True},
-    }
+    if not isinstance(out, dict) or not {"method", "z", "prior", "info"} <= out.keys():
+        raise ValueError(f"{path} is not a chain file written by run_nuts.py or run_pcn.py")
+    return out
 
 
 def chain_prior(chain, V):
     """
-    The prior a chain was sampled with, rebuilt on the function space V: the stored KL basis
-    and latent mean are used when available. Chains of the 14 Oct 2026 boundary-layer preview
-    store mean_a and mean_ell but not the mean vector; their mean is rebuilt from that formula.
+    The prior a chain was sampled with, rebuilt on the function space V from its stored settings; the stored
+    KL basis and latent mean replace the rebuilt ones when the chain has them.
     """
     import torch
     from prior import MaternKLPrior
 
-    settings = dict(chain["prior"])
-    ell = settings.pop("mean_ell", None)
-    settings.pop("mean_type", None)
-    a = settings.get("mean_a", 0.0)
-    if ell is not None:
-        settings["mean_a"] = 0.0
-    prior = MaternKLPrior(V, **settings)
+    prior = MaternKLPrior(V, **{k: chain["prior"][k] for k in ("n_kl", "tau", "alpha", "k", "mean_a")})
     if chain.get("kl_basis") is not None:
         prior.basis = torch.from_numpy(chain["kl_basis"])
     if chain.get("latent_mean") is not None:
         prior.mean = torch.from_numpy(chain["latent_mean"])
-    elif ell is not None:
-        y = V.tabulate_dof_coordinates()[:, 1]
-        prior.mean = torch.from_numpy(a * (np.exp(-(1.0 - y) / ell) - np.exp(-y / ell)))
     return prior
 
 
@@ -245,7 +195,7 @@ def _init_kind(chain):
 
 def chain_identity(chain):
     """What must agree between chains of one experiment: sampler, setting, data, prior (including the
-    plateau bounds of the joint setting), basis, mean, initialisation policy, manifest and code."""
+    plateau bounds of the joint setting), basis, mean, initialisation policy and code."""
     info, prov = chain["info"], chain.get("provenance") or {}
     sampler = {k: info.get(k) for k in ("setting", "adapted", "target_acceptance", "target_accept_prob",
                                          "mass_matrix", "max_tree_depth", "n_warmup", "n_burn", "warmup_steps")}
@@ -254,7 +204,7 @@ def chain_identity(chain):
     return (chain["method"], tuple(sorted(sampler.items())), tuple(sorted(chain["prior"].items())),
             tuple(sorted((chain.get("plateau_bounds") or {}).items())),
             prov.get("data_sha256"), _sha(chain.get("kl_basis")), _sha(chain.get("latent_mean")),
-            _init_kind(chain), (prov.get("manifest") or {}).get("sha256"), (prov.get("code") or {}).get("source_sha256"))
+            _init_kind(chain), (prov.get("code") or {}).get("source_sha256"))
 
 
 def chain_content_sha256(chain):

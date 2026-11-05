@@ -1,12 +1,14 @@
 # representation_error.py
 """
-Best approximation of the true doping by the pushforward prior (Reviewer 1, Eq. (4.7): "report the best
-sigmoid-approximation error at k = 20 or show sensitivity to k"). For each sharpness k and KL truncation
-N_KL (production prior otherwise: trend mean a = 2, tau = 16, alpha = 4, known plateaus), find
-    z* = argmin_z || c_p + (c_n - c_p) S(k (m + Phi z)) - c_true ||_{L2}^2
-(L-BFGS-B, several starts) and report the relative L2 error (RE) and SSIM of the best approximation.
-This is the part of the reported RE and SSIM that no data could remove. No PDE solves are involved.
-Usage: python representation_error.py [--k 10 14 20 28] [--n_kl 12 48] [--out results/kstudy_Ex1]
+Best approximation of the true doping by the sigmoid pushforward (4.7) of the prior (paper Section 6.3.3). For each
+sharpness k and KL truncation N_KL (prior of the paper otherwise: trend mean a = 2, tau = 16, alpha = 4, known
+plateaus), minimise
+    || c_p + (c_n - c_p) S(k (m + Phi z)) - c_true ||_{L2}^2
+over z (L-BFGS-B from several starts) and report the relative L2 error (RE) and SSIM of the best approximation
+found. The problem is not convex, so this RE is the smallest one found numerically, not a proven lower bound.
+No PDE solves are involved.
+Usage: python representation_error.py [--k 10 14 20 28] [--n_kl 12 48] [--examples 1] [--out results/kstudy_Ex1]
+(the folder obs/ holds the Example 1 data only)
 """
 import argparse
 import json
@@ -46,7 +48,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--k", type=float, nargs="+", default=[10, 14, 20, 28])
     ap.add_argument("--n_kl", type=int, nargs="+", default=[12, 48])
-    ap.add_argument("--examples", type=int, nargs="+", default=[1, 2])
+    ap.add_argument("--examples", type=int, nargs="+", default=[1])
     ap.add_argument("--out", default=os.path.join(cfg.RESULTS_DIR, "kstudy_Ex1"))
     a = ap.parse_args()
     torch.set_num_threads(1)
@@ -61,7 +63,8 @@ if __name__ == "__main__":
                 c_best, res = best_approximation(prior, c_true, M)
                 rows.append(dict(example=ex, n_kl=n_kl, k=k, RE=relative_l2_error(M, c_best, c_true),
                                  SSIM=ssim(V, c_best, c_true), z_norm=float(np.linalg.norm(res.x)), converged=bool(res.success)))
-    lines = ["| N_KL | k | Example 1: best RE / SSIM | Example 2: best RE / SSIM |", "|---|---|---|---|"]
+    lines = ["| N_KL | k | " + " | ".join(f"Example {ex}: best RE / SSIM" for ex in a.examples) + " |",
+             "|---|---|" + "---|" * len(a.examples)]
     for n_kl in a.n_kl:
         for k in a.k:
             cells = []

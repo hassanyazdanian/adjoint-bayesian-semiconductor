@@ -191,10 +191,11 @@ def true_field(data, V):
     if n == int(data["mesh_n"]):
         return np.asarray(data["c_true"], dtype=float)
     V0 = PoissonBoltzmannModel(data["mesh_n"], data["eps"], data["delta"], data["electrodes"]).V
-    c0 = true_doping(V0, int(data["example"]), data["cp_true"], data["cn_true"])
+    width = data.get("interface_width", cfg.INTERFACE_WIDTH)
+    c0 = true_doping(V0, int(data["example"]), data["cp_true"], data["cn_true"], width)
     if not np.allclose(c0, data["c_true"], rtol=0, atol=1e-12):
-        raise ValueError("the true-doping formula does not reproduce the stored field (interface width?)")
-    return true_doping(V, int(data["example"]), data["cp_true"], data["cn_true"])
+        raise ValueError("the true-doping formula does not reproduce the stored field")
+    return true_doping(V, int(data["example"]), data["cp_true"], data["cn_true"], width)
 
 
 def build_problem(data, setting, k=None, n_kl=None, tau=None, mean_a=None, cp_bounds=None, cn_bounds=None,

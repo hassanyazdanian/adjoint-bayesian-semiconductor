@@ -3,7 +3,7 @@
 Figures of one example with known plateau values, from a pCN run, a NUTS run and a MAP run (Example 1: Figure 4
 and Figure 5 (a, b); Example 2: Figure 6 and Figure 5 (c, d); Figure 3, the prior samples, is plot_prior_samples.py).
 Inputs are checked before use: the chain files, fields.npz and summary.json of each run must belong together and to
-the data file, and the MAP must have the chains' prior and data.
+the data file, and the MAP must have the chains' prior and data and must have converged.
 File names start with ex<example>.
 - ex<e>_true.png, ex<e>_mean_pcn.png, ex<e>_mean_nuts.png, ex<e>_map.png: one color scale (c_p, c_n);
   true interface solid black, inferred interface (c = 0 of the field shown) dashed red.
@@ -101,6 +101,9 @@ def main(a):
     if ((mp.get("provenance") or {}).get("data_sha256") != data_sha
             or [mp["prior"].get(k) for k in keys] != [p.get(k) for k in keys]):
         raise ValueError(f"{a.map}: the MAP was not computed with the chains' prior and data")
+    if mp.get("success") is not True:
+        raise ValueError(f"{a.map}: the MAP optimisation did not converge ({mp.get('message')}); "
+                         "run run_map.py again, for example with a larger --maxiter")
 
     os.makedirs(a.out, exist_ok=True)
     V = dl.FunctionSpace(dl.UnitSquareMesh(dl.MPI.comm_self, data["mesh_n"], data["mesh_n"]), "CG", 1)

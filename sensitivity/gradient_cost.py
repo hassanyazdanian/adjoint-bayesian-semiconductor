@@ -1,7 +1,7 @@
 # gradient_cost.py
 """
-Cost of one gradient of the negative log-posterior J(theta) as a function of the KL truncation N_KL
-(Reviewer 2: is the adjoint's dimension-independence actually tested?), Example 1, both settings
+Cost of one gradient of the negative log-posterior J(theta) as a function of the KL truncation N_KL, a test of
+whether the cost of the adjoint gradient is independent of the dimension d, Example 1, both settings
 (d = N_KL with known plateaus, d = N_KL + 2 jointly):
   - adjoint: one recorded nonlinear forward solve and one adjoint solve per gradient, whatever d;
   - forward differences: d + 1 nonlinear forward solves per gradient.
@@ -64,7 +64,7 @@ def benchmark(n_kl, setting, reps, rng):
     return dict(n_kl=n_kl, setting=setting, d=d,
                 adjoint_time_s=float(np.median(t_adj)),
                 adjoint_forward_solves=(s1[0] - s0[0]) / reps, adjoint_adjoint_solves=(s1[1] - s0[1]) / reps,
-                fd_time_s=float(np.median(t_fd)), fd_forward_solves=(s2[0] - s1[0]) / 2,
+                fd_time_s=float(np.median(t_fd)), fd_forward_solves=(s2[0] - s1[0]) / len(t_fd),
                 speedup=float(np.median(t_fd) / np.median(t_adj)),
                 rel_diff_adjoint_vs_central_fd=float(np.linalg.norm(g_adj - g_fd) / np.linalg.norm(g_fd)))
 
@@ -75,6 +75,8 @@ if __name__ == "__main__":
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--out", default=os.path.join(cfg.RESULTS_DIR, "scaling_Ex1"))
     a = ap.parse_args()
+    if a.reps < 1:
+        ap.error("--reps must be at least 1")
     torch.set_num_threads(1)
     rng = np.random.default_rng(0)
     rows = [benchmark(n, s, a.reps, rng) for s in (1, 2) for n in a.n_kl]

@@ -31,7 +31,7 @@ class DepthTrackingNUTS(NUTS):
 
 
 def run_nuts(data_path, setting, out_path, chain=0, k=None, n_kl=None, tau=None, mean_a=None, warmup_steps=500, num_samples=1000,
-             target_accept_prob=0.8, max_tree_depth=10, full_mass=False, seed=0, init_file=None, manifest=None,
+             target_accept_prob=0.8, max_tree_depth=10, full_mass=False, seed=0, init_file=None,
              cp_bounds=None, cn_bounds=None, inversion_mesh=None):
     if warmup_steps < 0 or num_samples < 1:
         raise ValueError("warmup_steps must be >= 0 and num_samples >= 1")
@@ -43,7 +43,7 @@ def run_nuts(data_path, setting, out_path, chain=0, k=None, n_kl=None, tau=None,
     pyro.set_rng_seed(seed + chain)
     theta0, init_policy = starting_point(post, np.random.default_rng(seed + chain), init_file, chain, seed + chain)
     theta0 = torch.from_numpy(theta0)
-    identity = run_identity(data, init_policy, manifest)          # captured at launch, before sampling
+    identity = run_identity(data, init_policy)          # captured at launch, before sampling
     print(f"NUTS chain {chain}: setting {setting}, inversion mesh {model.n} x {model.n}, dim(theta) = {post.dim}, N_meas = {model.n_meas}, "
           f"sigma = {post.sigma:.4e}, k = {post.prior.k}, {'dense' if full_mass else 'diagonal'} mass matrix, "
           f"target acceptance {target_accept_prob}")
@@ -111,7 +111,6 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="", help="suffix of the run folder, e.g. _dense or _k10")
     ap.add_argument("--k", type=float, default=None, help="sigmoid sharpness (default config.K_SIGMOID)")
     ap.add_argument("--n_kl", type=int, default=None, help="KL truncation (default config.N_KL)")
-    ap.add_argument("--manifest", default=None, help="experiment manifest (JSON); its identity is stored with the chain")
     ap.add_argument("--init_file", default=None, help=".npy file with one starting point per chain (default: prior draw)")
     ap.add_argument("--tau", type=float, default=None, help="Matern tau (default config.TAU)")
     ap.add_argument("--mean_a", type=float, default=None, help="trend-mean slope a (default config.PRIOR_MEAN_A; 0: zero mean)")
@@ -127,6 +126,6 @@ if __name__ == "__main__":
         out_path=cfg.chain_file("nuts", a.setting, a.example, a.chain, a.tag),
         chain=a.chain, k=a.k, n_kl=a.n_kl, tau=a.tau, mean_a=a.mean_a,
         warmup_steps=a.warmup_steps, num_samples=a.num_samples, target_accept_prob=a.target_accept_prob,
-        max_tree_depth=a.max_tree_depth, full_mass=a.full_mass, seed=a.seed, init_file=a.init_file, manifest=a.manifest,
+        max_tree_depth=a.max_tree_depth, full_mass=a.full_mass, seed=a.seed, init_file=a.init_file,
         cp_bounds=a.cp_bounds, cn_bounds=a.cn_bounds, inversion_mesh=a.inversion_mesh_n,
     )

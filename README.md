@@ -16,15 +16,23 @@ Each folder is self-contained, with its own copy of the model code and the data.
 
 ## Requirements
 
-The paper's results were computed with Python 3.11.13, FEniCS 2019.1.0, dolfin-adjoint 2023.0.0, PyTorch 2.7.1, Pyro 1.9.1, ArviZ 0.23.4, NumPy 2.3.3, SciPy 1.16.2, pandas, matplotlib and scikit-image, on an Apple M4 Pro.
+The paper's results were computed on an Apple M4 Pro (macOS, arm64) with Python 3.11.13, FEniCS 2019.1.0, PyTorch 2.7.1, Pyro 1.9.1, ArviZ 0.23.4, NumPy 2.3.3, SciPy 1.16.2, pandas 3.0.6, matplotlib 3.10.6 and scikit-image 0.26.0. The adjoint code that is imported is dolfin-adjoint/pyadjoint 2018.1.0 from the `torch-fenics` branch of `https://bitbucket.org/barkm/pyadjoint` (commit 3d02816), installed with pip over the conda-forge package dolfin-adjoint 2023.0.0; the package metadata, and so the provenance stored with the chains, report 2023.0.0.
+
+`environment.yml` is an export of that conda environment, with the two packages installed from git pinned to their commits. It is specific to macOS arm64 and has not been tested on another machine:
+
+```bash
+conda env create -f environment.yml
+conda activate fenics-env
+```
 
 ## How a run works
 
 - `run_chains.py nuts|pcn <options>` runs four chains in parallel, one process per chain, with one thread per process. Chain c uses the seed `--seed` + c and starts from a prior draw. All other options are passed to `run_nuts.py` or `run_pcn.py`. The chains are written to `results/<method>_Setting<s>_Ex<e><tag>/`, and the wall-clock time of the batch to `results/<method>_Setting<s>_Ex<e><tag>_batch.json`.
 - `postprocess.py <run folder> --data <data file>` computes R-hat, bulk and tail ESS, MCSE, cost-normalised ESS, the posterior mean and std fields, RE, SSIM and the junction depth. It writes `<run folder>_postprocess/`.
+- The default settings of the scripts (`config.py`) are for short trial runs, not the paper's: for example, `run_nuts.py` keeps 1000 draws per chain, with target acceptance 0.8 and a diagonal mass matrix, and `run_pcn.py` tunes the pCN step. The commands below give every setting of the paper explicitly.
 - The data sets of the paper are in `obs/`. `generate_synthetic_data.py` regenerates them (`--examples`, `--data_mesh`) and overwrites the files in `obs/`.
 - The times given below are those of the paper's runs. Run nothing else on the machine during a run if the timings matter.
-- In some MPI environments a process exits with a non-zero status (for example 143) from `MPI_Finalize` after it has written its output. `run_chains.py` checks the chain files instead of the exit status.
+- In some MPI environments a process exits with a non-zero status (for example 143) from `MPI_Finalize` after it has written its output. `run_chains.py` therefore reads every chain file back (chain index, seed and number of draws) instead of relying on the exit status. Chain files are written to a temporary file first and renamed when complete.
 
 ## Example 1: straight junction (Section 6.3.1)
 
@@ -127,9 +135,9 @@ python make_tables.py          # results/tables/table1_ex1.tex, table2_ex2.tex; 
 
 ```bash
 cd sensitivity
-python verify_gradients.py              # Taylor test in both inference settings; prints "Gradient checks passed."
+python verify_gradients.py              # Taylor tests and central differences in both settings; prints "Gradient checks passed."
 python gradient_cost.py                 # time of one adjoint gradient for N_KL = 12 to 192 -> results/scaling_Ex1/
-python representation_error.py          # best sigmoid approximation of the truth for k = 10, 14, 20, 28 -> results/kstudy_Ex1/
+python representation_error.py          # best sigmoid approximation of the Example 1 truth, k = 10, 14, 20, 28 -> results/kstudy_Ex1/
 
 # Table 3: NUTS, four chains of 500 draws (26 to 145 min each). Reference run:
 python run_chains.py nuts --example 1 --setting 1 --data obs/obs_Ex1.pickle --seed 0 --tau 16 --n_kl 12 --k 14 --mean_a 2 \

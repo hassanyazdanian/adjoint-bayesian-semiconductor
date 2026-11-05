@@ -1,9 +1,11 @@
 """Stage-A-only marginal posteriors of c_p and c_n for the joint reconstruction figure (Section 6.4).
-Reads the four chain files of results/nuts_Setting2_Ex1_prod_v3_joint_A and checks that the draws
-reproduce the posterior summaries of production_v3_report/joint/tables.json before plotting.
+Reads the four chain files of the Stage A run (results/nuts_Setting2_Ex1_A) and checks that the draws
+reproduce the posterior summaries of the joint_report.py record (results/joint/tables.json) before plotting.
+The checks are those of the paper's run: four chains of 2000 draws, seeds 100 to 103, the paper's plateau
+intervals. The chain files are read with an unpickler that accepts only NumPy arrays (no other classes).
 Style as plotting.plot_histogram (figsize, fonts, colours), but without the KDE, which would smooth
 across the hard bounds of the uniform prior, and with the x-axis on the prior interval.
-Usage: python3 -I make_joint_marginals.py <run_dir> <tables.json> <out_dir>"""
+Usage: python make_joint_marginals.py results/nuts_Setting2_Ex1_A results/joint/tables.json results/joint"""
 import hashlib, io, json, os, pickle, sys
 import numpy as np
 import matplotlib
@@ -12,9 +14,15 @@ import matplotlib.pyplot as plt
 matplotlib.rcParams.update({"font.family": "serif", "font.serif": ["STIX Two Text", "STIXGeneral", "DejaVu Serif"],
                             "mathtext.fontset": "stix"})
 
+ARRAYS = {("numpy", "ndarray"), ("numpy", "dtype")} | {(m, n) for m in ("numpy._core.multiarray", "numpy.core.multiarray")
+                                                    for n in ("_reconstruct", "scalar")} \
+         | {(m, "_frombuffer") for m in ("numpy._core.numeric", "numpy.core.numeric")}
+
+
 class Safe(pickle.Unpickler):
+    """Unpickler for the chain files: NumPy arrays and scalars only."""
     def find_class(self, module, name):
-        if module.split('.')[0] in ('numpy', 'builtins', 'collections', 'copyreg', '_codecs'):
+        if (module, name) in ARRAYS:
             return super().find_class(module, name)
         raise pickle.UnpicklingError(f"blocked {module}.{name}")
 

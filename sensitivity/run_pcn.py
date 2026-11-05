@@ -17,7 +17,7 @@ from samplers import pcn, gibbs_pcn
 
 
 def run_pcn(data_path, setting, out_path, chain=0, k=None, n_kl=None, tau=None, mean_a=None, beta=None, n_warmup=5000,
-            n_samples=300000, n_burn=30000, beta0=0.1, target_acceptance=0.234, seed=0, init_file=None, manifest=None):
+            n_samples=300000, n_burn=30000, beta0=0.1, target_acceptance=0.234, seed=0, init_file=None):
     torch.set_num_threads(1)
     t_launch = time.time()                          # epoch seconds, before the model is built
     if n_samples < 1 or n_warmup < 0 or n_burn < 0:
@@ -27,7 +27,7 @@ def run_pcn(data_path, setting, out_path, chain=0, k=None, n_kl=None, tau=None, 
     model = post.model
     rng = np.random.default_rng(seed + chain)
     theta0, init_policy = starting_point(post, rng, init_file, chain, seed + chain)
-    identity = run_identity(data, init_policy, manifest)          # captured at launch, before sampling
+    identity = run_identity(data, init_policy)          # captured at launch, before sampling
     adapt = beta is None
     print(f"pCN chain {chain}: setting {setting}, dim(theta) = {post.dim}, N_meas = {model.n_meas}, "
           f"sigma = {post.sigma:.4e}, k = {post.prior.k}, " + ("tuned beta" if adapt else f"fixed beta = {beta}"))
@@ -91,7 +91,6 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="", help="suffix of the run folder, e.g. _k10 or _beta0.01")
     ap.add_argument("--k", type=float, default=None, help="sigmoid sharpness (default config.K_SIGMOID)")
     ap.add_argument("--n_kl", type=int, default=None, help="KL truncation (default config.N_KL)")
-    ap.add_argument("--manifest", default=None, help="experiment manifest (JSON); its identity is stored with the chain")
     ap.add_argument("--init_file", default=None, help=".npy file with one starting point per chain (default: prior draw)")
     ap.add_argument("--tau", type=float, default=None, help="Matern tau (default config.TAU)")
     ap.add_argument("--mean_a", type=float, default=None, help="trend-mean slope a (default config.PRIOR_MEAN_A; 0: zero mean)")
@@ -105,5 +104,5 @@ if __name__ == "__main__":
         out_path=cfg.chain_file("pcn", a.setting, a.example, a.chain, a.tag),
         chain=a.chain, k=a.k, n_kl=a.n_kl, tau=a.tau, mean_a=a.mean_a, beta=a.beta,
         n_warmup=a.n_warmup, n_samples=a.n_samples, n_burn=a.n_burn, beta0=a.beta0,
-        target_acceptance=a.target_acceptance, seed=a.seed, init_file=a.init_file, manifest=a.manifest,
+        target_acceptance=a.target_acceptance, seed=a.seed, init_file=a.init_file,
     )

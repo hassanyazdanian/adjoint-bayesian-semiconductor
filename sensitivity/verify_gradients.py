@@ -28,13 +28,20 @@ def taylor_test(post, theta, direction, hs=(1e-2, 5e-3, 2.5e-3, 1.25e-3, 6.25e-4
     return rates
 
 
+CD_TOL = 1e-5     # relative error of an adjoint partial derivative against central differences (observed: below 1e-6)
+
+
 def central_differences(post, theta, idxs, eps=1e-5):
+    """Relative errors of the adjoint partial derivatives dJ/dtheta[i], i in idxs, against central differences."""
     _, g = post.value_and_grad(theta)
+    errors = []
     for i in idxs:
         e = np.zeros_like(theta)
         e[i] = eps
         fd = (value(post, theta + e) - value(post, theta - e)) / (2 * eps)
-        print(f"  dJ/dtheta[{i:2d}]: adjoint {g[i]: .8e}  FD {fd: .8e}  rel.err {abs(g[i] - fd) / abs(fd):.1e}")
+        errors.append(abs(g[i] - fd) / abs(fd))
+        print(f"  dJ/dtheta[{i:2d}]: adjoint {g[i]: .8e}  FD {fd: .8e}  rel.err {errors[-1]:.1e}")
+    return np.array(errors)
 
 
 if __name__ == "__main__":
@@ -51,8 +58,15 @@ if __name__ == "__main__":
         print(f"Setting {setting} (dim {post.dim}): J = {value(post, theta):.6e}")
         print(" Taylor test, random direction:")
         rates = taylor_test(post, theta, rng.standard_normal(post.dim))
+        assert np.all(rates > 1.8), "Taylor test failed"
+        if setting == 2:
+            # the plateau values enter through the doping and through both Dirichlet boundary values
+            print(" Taylor test, plateau values only:")
+            direction = np.zeros(post.dim)
+            direction[post.n_kl:] = rng.standard_normal(2)
+            assert np.all(taylor_test(post, theta, direction) > 1.8), "Taylor test in the plateau directions failed"
         idxs = [0, 1, post.n_kl - 1] + ([post.n_kl, post.n_kl + 1] if setting == 2 else [])
         print(" Central differences:")
-        central_differences(post, theta, idxs)
-        assert np.all(rates > 1.8), "Taylor test failed"
+        errors = central_differences(post, theta, idxs)
+        assert np.all(errors < CD_TOL), f"adjoint gradient and central differences differ by more than {CD_TOL:g}"
     print("Gradient checks passed.")

@@ -1,17 +1,19 @@
 # compare_samplers.py
 """
-Agreement of the posteriors of completed runs on the same data (divergence follow-up of the
-production runs): for every monitored quantity (all KL coefficients and the junction depth d), the
+Agreement of the posteriors of completed runs of the same target (Example 2, Section 6.3.2: pCN and NUTS
+with target acceptance 0.95 and 0.99): for every monitored quantity (all KL coefficients and the junction depth d), the
 mean, sd and the 1, 5, 50, 95 and 99 % quantiles of each run with their Monte Carlo standard errors
 (ArviZ, Vehtari et al. 2021), and the difference to the reference run in units of the combined MCSE,
 z = (stat_run - stat_ref) / sqrt(mcse_run^2 + mcse_ref^2). For d also the per-chain 95 and 99 %
 quantiles and the fraction of draws above the reference's 95 and 99 % quantiles.
 
 The chains, fields.npz (per-draw depths) and summary.json of every run must belong together, and all
-runs must use the same data. The first run is the reference.
+runs must have the same posterior: the same data, setting, prior (including k), plateau bounds, inversion
+mesh, KL basis and latent mean, so that the KL coefficients are comparable. Sampler settings may differ.
+The first run is the reference.
 
-Usage: python compare_samplers.py results/pcn_Setting1_Ex2_prod_v2_pcn2m results/nuts_Setting1_Ex2_prod_v2 \
-         results/nuts_Setting1_Ex2_prod_v2_t099 --example 2 --out results/production_v2_report/ex2/comparison
+Usage: python compare_samplers.py results/pcn_Setting1_Ex2 results/nuts_Setting1_Ex2 results/nuts_Setting1_Ex2_t099 \
+         --example 2 --out results/ex2_depth_quantiles
 Writes comparison.json, comparison.md and depth_agreement.tex (the table of d for the paper).
 """
 import argparse
@@ -42,8 +44,35 @@ def load_run(run):
         raise ValueError(f"{run}: chains, fields.npz and summary.json do not belong together")
     draws = {f"z[{j}]": np.stack([c["z"][:, j] for c in chains]) for j in range(chains[0]["z"].shape[1])}
     draws["depth"] = np.asarray(fields["depth"], dtype=float)
-    return dict(run=run, method=s["method"], data_sha256=s["data_sha256"], summary=s, draws=draws,
+    c0 = chains[0]
+    target = dict(setting=1 if c0["r"] is None else 2, prior={k: c0["prior"][k] for k in ("n_kl", "tau", "alpha", "k", "mean_a")},
+                  plateau_bounds=c0.get("plateau_bounds"),
+                  inversion_mesh_n=s.get("inversion_mesh_n", c0["info"].get("inversion_mesh_n")))
+    return dict(run=run, method=s["method"], data_sha256=s["data_sha256"], summary=s, draws=draws, target=target,
+                kl_basis=c0.get("kl_basis"), latent_mean=c0.get("latent_mean"),
                 target_accept_prob=(s.get("sampler") or [{}])[0].get("target_accept_prob"))
+
+
+def _same_array(a, b):
+    """Equal up to round-off (None only matches None)."""
+    if a is None or b is None:
+        return a is None and b is None
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    return a.shape == b.shape and bool(np.allclose(a, b, rtol=0, atol=1e-10 * max(1.0, float(np.abs(b).max()))))
+
+
+def check_same_target(runs):
+    """Raise unless every run samples the posterior of the first in the same coordinates."""
+    ref = runs[0]
+    for r in runs[1:]:
+        if r["data_sha256"] != ref["data_sha256"]:
+            raise ValueError(f"{r['run']} and {ref['run']} use different data")
+        if r["target"] != ref["target"]:
+            raise ValueError(f"{r['run']} and {ref['run']} have different posteriors: {r['target']} and {ref['target']}")
+        for key in ("kl_basis", "latent_mean"):
+            if not _same_array(r[key], ref[key]):
+                raise ValueError(f"{r['run']} and {ref['run']} have different {key.replace('_', ' ')}s, so their KL "
+                                 "coefficients are not comparable")
 
 
 def statistics(x):
@@ -60,8 +89,7 @@ def statistics(x):
 
 def main(a):
     runs = [load_run(r) for r in a.runs]
-    if len({r["data_sha256"] for r in runs}) != 1:
-        raise ValueError("the runs use different data")
+    check_same_target(runs)
     ref = runs[0]
     quantities = list(ref["draws"])
     stats = {r["run"]: {q: statistics(r["draws"][q]) for q in quantities} for r in runs}

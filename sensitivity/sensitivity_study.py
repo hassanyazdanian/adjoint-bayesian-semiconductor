@@ -51,10 +51,14 @@ def _runs(defaults, overrides):
     return runs
 
 
-def _diag_block(diag, rows):
-    """R-hat and ESS over the given quantities; the minimum ESS and the quantity and kind that set it."""
+def _diag_block(diag, rows, run):
+    """R-hat and ESS over the given quantities; the minimum ESS and the quantity and kind that set it. An undefined
+    R-hat or ESS stops the report (pandas minima and maxima would skip it)."""
     sub = diag.loc[rows, ["r_hat", "ess_bulk", "ess_tail"]].astype(float)
     finite = bool(np.isfinite(sub.to_numpy()).all())
+    if not finite:
+        bad = [q for q, ok in zip(sub.index, np.isfinite(sub.to_numpy()).all(axis=1)) if not ok]
+        raise ValueError(f"{run}: undefined R-hat or ESS for {bad}")
     b, t = sub.ess_bulk, sub.ess_tail
     kind = "bulk" if b.min() <= t.min() else "tail"
     q = (b if kind == "bulk" else t).idxmin()
@@ -95,8 +99,8 @@ def row_metrics(run, M, w):
     if int(s.get("inversion_mesh_n", data["mesh_n"])) != int(data["mesh_n"]):
         raise ValueError(f"{run}: inversion mesh other than {data['mesh_n']} x {data['mesh_n']}")
     fl = {key: np.asarray(fields[key], dtype=float) for key in ("c_std", "hpd_low", "hpd_high")}
-    d_all = _diag_block(diag, [f"z[{j}]" for j in range(n_kl)] + ["depth"])
-    d12 = _diag_block(diag, [f"z[{j}]" for j in range(min(12, n_kl))] + ["depth"])
+    d_all = _diag_block(diag, [f"z[{j}]" for j in range(n_kl)] + ["depth"], run)
+    d12 = _diag_block(diag, [f"z[{j}]" for j in range(min(12, n_kl))] + ["depth"], run)
     cost = s["cost"]
     n_draws = s["n_chains"] * s["draws_per_chain"]
     fe = {ph: cost[ph]["forward_equivalents"] for ph in ("sampling", "total")}

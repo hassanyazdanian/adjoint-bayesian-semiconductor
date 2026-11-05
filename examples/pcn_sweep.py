@@ -6,7 +6,7 @@ acceptance rate 0.234 (beta_0 = mean tuned step of the four chains), then with t
 the given factors f. Each run is made with run_chains.py and postprocessed with postprocess.py; a run whose
 postprocessing summary exists is not run again. For every run the table gives the mean acceptance rate, max R-hat,
 the minimum bulk or tail ESS over all KL coefficients and the junction depth, and that ESS per 10^3 PDE solves of
-the retained draws. The production pCN runs use the f with the largest ESS per 10^3 PDE solves (f = 8 in both
+the retained draws. The paper's pCN runs use the f with the largest ESS per 10^3 PDE solves (f = 8 in both
 examples).
 Usage: python pcn_sweep.py --example 1 --factors 0.5 2 3 4 6 8 12
        python pcn_sweep.py --example 2 --factors 6 8 12
@@ -51,7 +51,7 @@ def record(label, run, factor):
     with open(f"{pp}/summary.json") as f:
         s = json.load(f)
     chains = load_chains(run)
-    hashes = s.get("chain_content_sha256")             # not recorded by older postprocessing versions
+    hashes = s.get("chain_content_sha256")             # not recorded in the summaries of the paper's Example 1 sweep
     if ((hashes is not None and hashes != [chain_content_sha256(c) for c in chains])
             or s["n_chains"] != len(chains) or s["draws_per_chain"] != len(chains[0]["z"])):
         raise ValueError(f"{pp} does not belong to the chains of {run}")
