@@ -190,8 +190,20 @@ The N_KL = 12 run is the pCN run of Example 1. Instead of running it again, you 
 
 ## Citation
 
-If you use this code, please cite the accompanying paper.
+If you use this code, please cite:
+
+```bibtex
+@misc{yazdanian2026adjointbased,
+  title={Adjoint-Based Bayesian Uncertainty Quantification for PDE-Constrained Inverse Problems with Application to Semiconductor Imaging},
+  author={Yazdanian, Hassan and Taghizadeh, Leila and Maboudi Afkham, Babak},
+  year={2026},
+  eprint={2606.30340},
+  archivePrefix={arXiv},
+  primaryClass={math.NA},
+  url={https://arxiv.org/abs/2606.30340}
+}
+```
 
 ## License
 
-MIT License, see `LICENSE`.
+This project is licensed under the MIT License. See the LICENSE file for details.
