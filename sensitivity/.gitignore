@@ -1,0 +1,10 @@
+# Large or generated outputs (results are validated and provenance-tagged separately)
+results/
+__pycache__/
+*.pyc
+.DS_Store
+# Observation files are tracked (exact bytes); their figures and VTK exports are regenerated
+obs/*.png
+obs/*.pvd
+obs/*.vtu
+obs/*.log
