@@ -3,8 +3,7 @@
 Posterior summaries, convergence diagnostics and cost-normalised efficiency for one experiment
 (Sections 5.3, 6.3, 6.4).
 Usage: python postprocess.py results/nuts_Setting1_Ex1 --data obs/obs_Ex1.pickle
-The argument is a run folder with chain*.pickle files (or one or more chain files; files
-written by the original run_nuts.py / run_pcn.py are accepted as single chains).
+The argument is a run folder with chain*.pickle files, or one or more chain files.
 
 Diagnostics follow Vehtari et al. (2021) via ArviZ: rank-normalised split R-hat, bulk and
 tail ESS, and Monte Carlo standard errors, computed over all chains. Every monitored quantity
@@ -39,7 +38,7 @@ def _cost(chains):
       the mean adjoint to the mean forward solve time over the whole run (stated as
       adjoint_in_forward_equivalents).
     - forward_attempts, forward_failures, forward_restarts, forward_failed_evaluations, adjoint_failures:
-      only for chains that record them (from 21 Oct 2026).
+      only when every chain records them (the chains of the Example 1 step-size sweep do not).
     - batch: actual elapsed wall-clock time of the batch from the chains' epoch timestamps (first
       launch to last end, and from the first warm-up start), when every chain records them;
       elapsed_time_s_longest_chain is the longest single sampler run.
@@ -85,12 +84,9 @@ def _sampler_info(chains):
                        grads_per_iteration_mean=float(g.mean()), grads_per_iteration_max=int(g.max()),
                        warmup_grads_per_iteration_mean=float(np.mean(i["warmup_grads_per_iteration"]))
                        if len(i["warmup_grads_per_iteration"]) else 0.0)
-            if "tree_depth" in i:            # exact tree depth (chains written after 15 Oct 2026)
-                d = np.asarray(i["tree_depth"])
-                row.update(tree_depth_mean=float(d.mean()), tree_depth_max=int(d.max()),
-                           fraction_at_max_tree_depth=float(np.mean(d >= i["max_tree_depth"])))
-            else:                            # older chains: leapfrog-count proxy
-                row.update(fraction_at_max_leapfrog_budget=float(np.mean(g >= 2 ** i["max_tree_depth"] - 1)))
+            d = np.asarray(i["tree_depth"])
+            row.update(tree_depth_mean=float(d.mean()), tree_depth_max=int(d.max()),
+                       fraction_at_max_tree_depth=float(np.mean(d >= i["max_tree_depth"])))
             out.append(row)
         elif c["method"] == "pcn" and "beta" in i:
             out.append({key: i[key] for key in ("chain", "beta", "acceptance", "adapted", "target_acceptance",
@@ -98,7 +94,7 @@ def _sampler_info(chains):
     return out
 
 
-R_HAT_MAX, ESS_MIN, DIVERGENCE_FRACTION = 1.01, 400, 0.005     # thresholds of the production protocol
+R_HAT_MAX, ESS_MIN, DIVERGENCE_FRACTION = 1.01, 400, 0.005     # convergence and divergence thresholds
 
 
 def _divergences(chains, depth, z, out_dir):
@@ -152,9 +148,7 @@ def postprocess(paths, data_path, out_dir, max_field_samples=5000, batch=5000, x
     data, chains = load_data(data_path), load_chains(paths)
     data_sha = data["_source"]["sha256"]
     used = {(c.get("provenance") or {}).get("data_sha256") for c in chains}
-    if used == {None}:
-        print("warning: these chains record no data hash (original-format chains); the data file cannot be checked")
-    elif used != {data_sha}:
+    if used != {data_sha}:
         raise ValueError(f"{data_path} (SHA-256 {data_sha[:12]}...) is not the data the chains were sampled with "
                          f"({', '.join(sorted(str(u)[:12] + '...' for u in used))}); nothing was written")
     os.makedirs(out_dir, exist_ok=True)
@@ -163,7 +157,7 @@ def postprocess(paths, data_path, out_dir, max_field_samples=5000, batch=5000, x
     cp, cn = np.stack([c["cp"] for c in chains]), np.stack([c["cn"] for c in chains])
     joint = chains[0]["r"] is not None
 
-    # the inversion mesh the chains were sampled on (recorded from 30 Oct 2026; earlier chains used the data file's)
+    # the inversion mesh the chains were sampled on (chains that do not record it used the data file's)
     n_inv = int(chains[0]["info"].get("inversion_mesh_n", data["mesh_n"]))
     mesh = dl.UnitSquareMesh(dl.MPI.comm_self, n_inv, n_inv)
     V = dl.FunctionSpace(mesh, "CG", 1)
@@ -223,7 +217,6 @@ def postprocess(paths, data_path, out_dir, max_field_samples=5000, batch=5000, x
         "data_sha256": data_sha,
         "chain_provenance": {
             "code": sorted({json.dumps((c.get("provenance") or {}).get("code"), sort_keys=True) for c in chains}),
-            "manifest": sorted({json.dumps((c.get("provenance") or {}).get("manifest"), sort_keys=True) for c in chains}),
             "init_policy": [(c.get("provenance") or {}).get("init_policy") for c in chains],
         },
         "postprocess_code": code_version(),
@@ -295,7 +288,7 @@ def postprocess(paths, data_path, out_dir, max_field_samples=5000, batch=5000, x
         plot_histogram(cn.ravel(), os.path.join(out_dir, "hist_cn.png"), r"$c_{\mathrm{n}}$", data["cn_true"])
 
     # summary.json last and atomically: a complete summary newer than fields.npz shows that this
-    # invocation finished (check_run.py --summary relies on it)
+    # invocation finished
     tmp = os.path.join(out_dir, "summary.json.tmp")
     with open(tmp, "w") as f:
         json.dump(summary, f, indent=2, default=float)

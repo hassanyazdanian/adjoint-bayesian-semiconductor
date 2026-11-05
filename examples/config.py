@@ -34,8 +34,8 @@ TAU = 0.25 ** -2          # C = (tau I - Laplace)^(-alpha), Neumann BCs
 ALPHA = 4.0
 N_KL = 12                 # 99.9 % of the prior variance
 K_SIGMOID = 14.0          # median 10-90 % interface width of prior draws ~ 3.5 mesh cells
-# Latent prior mean m(y) = a (2y - 1): c = c_p at the bottom contact and c = c_n at the top
-# contact, consistent with the Dirichlet data (2.2), for any plateau values.
+# Latent prior mean m(y) = a (2y - 1): prior draws typically have c close to c_p at the bottom contact
+# and close to c_n at the top contact, as the Dirichlet data (2.2) assume (not guaranteed for every draw).
 PRIOR_MEAN_A = 2.0
 CP_BOUNDS = (-2.5, -1.5)  # c_p ~ U(CP_BOUNDS) in the joint setting
 CN_BOUNDS = (0.5, 1.5)    # c_n ~ U(CN_BOUNDS) in the joint setting

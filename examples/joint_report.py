@@ -106,6 +106,8 @@ def _mass(ind):
 
 def diagnostics(st):
     d = st["diag"][["r_hat", "ess_bulk", "ess_tail"]].astype(float)
+    if not np.isfinite(d.to_numpy()).all():      # pandas minima and maxima would skip an undefined value
+        raise ValueError(f"{st['run']}: undefined R-hat or ESS")
     b, t = d.ess_bulk, d.ess_tail
     kind = "bulk" if b.min() <= t.min() else "tail"
     conv = st["summary"]["convergence"]

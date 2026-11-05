@@ -36,6 +36,9 @@ def run_map(data_path, setting, k, out_dir, z0, maxiter, gtol, ftol, n_kl=None, 
     res = minimize(fun, theta0, jac=True, method="L-BFGS-B", callback=callback,
                    options=dict(maxiter=maxiter, gtol=gtol, ftol=ftol))
     print(res.message)
+    if not res.success:
+        print("WARNING: the optimiser did not converge; map.pickle records success = False, and make_figures.py "
+              "does not accept it")
 
     theta = res.x
     c_map = post.field(theta).numpy()
@@ -54,7 +57,7 @@ def run_map(data_path, setting, k, out_dir, z0, maxiter, gtol, ftol, n_kl=None, 
         J=res.fun, RE=re, SSIM=ss, success=bool(res.success), message=str(res.message), n_iter=res.nit,
         grad_norm=float(np.linalg.norm(res.jac)), setting=setting, objective="J without Jacobian of c(r)",
         prior=prior_settings(post.prior), kl_basis=post.prior.basis.numpy(), latent_mean=post.prior.mean.numpy(),
-        provenance=provenance(data_path, identity)))
+        provenance=provenance(identity)))
     plot_field(V, c_map, os.path.join(out_dir, "map.png"), cbar_label=r"$c_{\mathrm{MAP}}(\boldsymbol{x})$",
                contours=[(data["c_true"], TRUE_INTERFACE)])
     plot_data_fit(post.model.electrode_x, data["y_obs"], y_map, os.path.join(out_dir, "map_data_fit.png"),
@@ -68,7 +71,7 @@ if __name__ == "__main__":
     ap.add_argument("--setting", type=int, default=1, help="1: known plateaus, 2: joint")
     ap.add_argument("--data", default=None, help="data file (default: obs/obs_Ex<example>.pickle)")
     ap.add_argument("--out", default=None)
-    ap.add_argument("--k", type=float, default=cfg.K_SIGMOID, help="sigmoid sharpness (the original joint run used 50)")
+    ap.add_argument("--k", type=float, default=cfg.K_SIGMOID, help="sigmoid sharpness (default config.K_SIGMOID)")
     ap.add_argument("--n_kl", type=int, default=None, help="KL truncation (default config.N_KL)")
     ap.add_argument("--tau", type=float, default=None, help="Matern tau (default config.TAU)")
     ap.add_argument("--mean_a", type=float, default=None, help="trend-mean slope a (default config.PRIOR_MEAN_A; 0: zero mean)")
